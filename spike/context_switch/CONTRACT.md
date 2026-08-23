@@ -54,11 +54,13 @@ void     ms_ctx_switch(ms_ctx_t *from, ms_ctx_t *to);
 
 - Save x19–x28, fp(x29), lr(x30), sp into ms_ctx_t slots in order.
 - Return path: restore in reverse, `br x30` semantics via saved lr.
-- At `ms_ctx_make` trampoline entry: sp must be 16-byte aligned; place entry
-  fn in x19-resident slot or ctx-provided register per implementation, but
-  the trampoline MUST end in a tail call to `ms_ctx_exit_trampoline` pattern:
-  entry(userdata) then switch back to scheduler ctx (provided via userdata).
+- At `ms_ctx_make` trampoline entry: sp must be 16-byte aligned; the
+  trampoline calls entry(userdata) with userdata passed through UNMODIFIED,
+  then tail-switches back to its recorded return context. Return context is
+  recorded by ms_ctx_switch on every call (to.return_to = caller). Approved
+  interpretation from #9 review discussion (PR #15).
 - No x18 writes (platform register, reserved on Apple platforms).
+
 ## Mojo bindings (`mojito_spike.mojo`) — AMENDED per #16
 
 The C ABI above is unchanged. The Mojo-side declarations below were written
