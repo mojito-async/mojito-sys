@@ -59,20 +59,26 @@ void     ms_ctx_switch(ms_ctx_t *from, ms_ctx_t *to);
   the trampoline MUST end in a tail call to `ms_ctx_exit_trampoline` pattern:
   entry(userdata) then switch back to scheduler ctx (provided via userdata).
 - No x18 writes (platform register, reserved on Apple platforms).
+## Mojo bindings (`mojito_spike.mojo`) — AMENDED per #16
 
-## Mojo bindings (`mojito_spike.mojo`) — frozen names
+The C ABI above is unchanged. The Mojo-side declarations below were written
+against an assumed API and DO NOT compile on 1.0.0b2. Issue #10 owns the
+b2-legal formulation (origin parameters on UnsafePointer, `def` signatures,
+`std.` module paths, and the entry-callback mechanism) and MUST record what
+it discovers in SPIKE_REPORT.md under "Observed Mojo/compiler assumptions".
+Until #10 lands, tests/bench lanes code against these names and shapes,
+expecting red:
 
 ```mojo
 alias LIB := "libmojito_spike.dylib"
-fn ms_page_size() -> Int32
-fn ms_stack_alloc(bytes: Int, out_base: UnsafePointer[UnsafePointer[Byte]],
-                  out_top: UnsafePointer[UnsafePointer[Byte]]) -> Int32
-fn ms_stack_free(base: UnsafePointer[Byte])
-fn ms_stack_total_size() -> Int  # via size_t mapping Int64
-fn ms_ctx_make(ctx: UnsafePointer[Byte] /*ms_ctx_t*/, stack_top: UnsafePointer[Byte],
-               entry: UnsafePointer[Byte], userdata: UnsafePointer[Byte])
-fn ms_ctx_switch(from_: UnsafePointer[Byte], to: UnsafePointer[Byte])
+def ms_page_size() -> Int32
+def ms_stack_alloc(bytes: Int, out_base, out_top) -> Int32
+def ms_stack_free(base)
+def ms_stack_total_size() -> Int
+def ms_ctx_make(ctx, stack_top, entry, userdata)
+def ms_ctx_switch(from_, to)
 ```
+
 
 ## Workflow (every agent)
 
