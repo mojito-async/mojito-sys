@@ -1,0 +1,17 @@
+# Build artifacts
+*.mojopkg
+*.mojoc
+*.o
+*.a
+.so
+.dylib
+.mojolang-cache/
+
+# Spike local outputs
+spike/context_switch/out/
+spike/context_switch/*.log
+
+# Tooling
+.max_cache/
+__pycache__/
+.DS_Store
