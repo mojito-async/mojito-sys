@@ -27,10 +27,13 @@ owning issue / coordinate via hub message, not direct edits.
 
 typedef void (*ms_entry_fn)(void *userdata);
 
-/* Fixed-layout save area consumed by aarch64_switch.S: 13 x 8 bytes = 104
- * (regs[12] = x19..x30, then sp). Amended per panel review of PR #14. */
+/* Fixed-layout save area consumed by aarch64_switch.S: 21 x 8 bytes = 168
+ * (regs[12] = x19..x30 @0..95; fps[8] = d8..d15 low halves @96..159;
+ * sp @160). v2 per issue #19: AAPCS64 callee-saved d8-d15 must survive a
+ * switch or Mojo numeric frames corrupt silently. */
 typedef struct ms_ctx {
     uint64_t regs[12]; /* x19..x30 (x30=lr); slot i => reg x(19+i) */
+    uint64_t fps[8];   /* low 64 bits of v8..v15, callee-saved     */
     uint64_t sp;
 } ms_ctx_t;
 
