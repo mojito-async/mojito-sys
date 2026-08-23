@@ -1,35 +1,19 @@
 # S0 spike smoke demo (issue #10).
 #
-# Exercises the libmojito_spike.dylib surface from Mojo via @extern
-# declarations. This file intentionally carries its own declarations in the
-# RED phase so it fails at link/load time while no dylib exists yet; once the
-# binding module lands these move to mojito_spike.mojo.
+# Runs against libmojito_spike.dylib via the frozen bindings in
+# mojito_spike.mojo. The dylib is chosen at link time:
+#
+#   mojo run -Xlinker <path>/libmojito_spike.dylib spike/context_switch/demo.mojo
 
 from std.memory import stack_allocation
 
-
-@extern("ms_page_size")
-def ms_page_size() abi("C") -> Int32:
-    ...
-
-
-@extern("ms_stack_alloc")
-def ms_stack_alloc(
-    bytes: Int,
-    out_base: UnsafePointer[UnsafePointer[Byte, MutAnyOrigin], MutUntrackedOrigin],
-    out_top: UnsafePointer[UnsafePointer[Byte, MutAnyOrigin], MutUntrackedOrigin],
-) abi("C") -> Int32:
-    ...
-
-
-@extern("ms_stack_free")
-def ms_stack_free(base: UnsafePointer[Byte, MutAnyOrigin]) abi("C"):
-    ...
-
-
-@extern("ms_stack_total_size")
-def ms_stack_total_size() abi("C") -> Int:
-    ...
+from mojito_spike import (
+    BytePtr,
+    ms_page_size,
+    ms_stack_alloc,
+    ms_stack_free,
+    ms_stack_total_size,
+)
 
 
 def main():
@@ -37,7 +21,7 @@ def main():
     print("page size:", ps)
 
     # Out-slots handed to ms_stack_alloc; C writes the base/top pointers here.
-    var slots = stack_allocation[2, UnsafePointer[Byte, MutAnyOrigin]]()
+    var slots = stack_allocation[2, BytePtr]()
     var rc = ms_stack_alloc(2 * ps, slots, slots + 1)
     if rc == 0:
         print("stack alloc ok; base:", slots[], "top:", (slots + 1)[])
