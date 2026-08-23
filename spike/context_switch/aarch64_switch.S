@@ -36,7 +36,7 @@
 .set MS_CTX_SP_OFF, 96
 
 /* ------------------------------------------------------------------------ */
-/* void ms_ctx_switch(ms_ctx_t *from /*x0*/, ms_ctx_t *to /*x1*/)            */
+/* void ms_ctx_switch(ms_ctx_t *from [x0], ms_ctx_t *to [x1])               */
 /* Saves current callee-saved state into *from; resumes *to.                 */
 /* ------------------------------------------------------------------------ */
 .align 4
@@ -56,14 +56,14 @@ _ms_ctx_switch:
         adrp    x16, _ms_resume_tab@PAGE
         add     x16, x16, _ms_resume_tab@PAGEOFF
         mov     x17, #64
-1:      ldr     x15, [x16], #0
+1:      ldr     x15, [x16]
         cbz     x15, 2f                         /* empty slot */
         cmp     x15, x1
         b.eq    2f                              /* existing row */
         add     x16, x16, #16
         subs    x17, x17, #1
         b.ne    1b
-        sub     x16, x16, #1024                 /* table overflow: reuse slot 0 */
+        sub     x16, x16, #1024                 /* table full: reuse slot 0 */
 2:      str     x1, [x16]
         str     x0, [x16, #8]
 
@@ -84,8 +84,8 @@ _ms_ctx_switch:
         ret                                     /* br x30 semantics */
 
 /* ------------------------------------------------------------------------ */
-/* void ms_ctx_make(ms_ctx_t *ctx /*x0*/, void *stack_top /*x1*/,            */
-/*                  ms_entry_fn entry /*x2*/, void *userdata /*x3*/)         */
+/* void ms_ctx_make(ms_ctx_t *ctx [x0], void *stack_top [x1],               */
+/*                  ms_entry_fn entry [x2], void *userdata [x3])            */
 /* Synthesizes a resumed state: first switch lands on the exit trampoline    */
 /* with sp == stack_top (must be 16-byte aligned) and lr == trampoline.      */
 /* ------------------------------------------------------------------------ */
