@@ -11,8 +11,9 @@
 
 #include <stddef.h>
 
-/* 12 regs + sp, all uint64_t — matches the asm's stp/ldp offset scheme. */
-_Static_assert(sizeof(ms_ctx_t) == 176, "ms_ctx_t must be 12 regs + sp = 176 bytes");
+/* 12 regs + sp, all uint64_t = 13 x 8 = 104 bytes (contract amended per
+ * panel review of PR #14) — matches the asm's stp/ldp offset scheme. */
+_Static_assert(sizeof(ms_ctx_t) == 104, "ms_ctx_t must be 12 regs + sp = 104 bytes");
 _Static_assert(_Alignof(ms_ctx_t) == 8, "ms_ctx_t must be 8-byte aligned");
 _Static_assert(offsetof(ms_ctx_t, regs) == 0, "regs[] must be first: asm uses base+0..88");
 _Static_assert(offsetof(ms_ctx_t, sp) == 96, "sp slot must be at +96: asm immediate");
