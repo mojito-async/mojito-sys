@@ -1,4 +1,3 @@
-# S0 Spike Contract — FROZEN for wave 1
 
 All S0 sub-issue agents (#8–#13) implement against this exact interface.
 The header below is the single source of truth; changing it requires a new
@@ -28,7 +27,8 @@ owning issue / coordinate via hub message, not direct edits.
 
 typedef void (*ms_entry_fn)(void *userdata);
 
-/* Fixed-layout save area consumed by aarch64_switch.S. 22 x 8 bytes = 176. */
+/* Fixed-layout save area consumed by aarch64_switch.S: 13 x 8 bytes = 104
+ * (regs[12] = x19..x30, then sp). Amended per panel review of PR #14. */
 typedef struct ms_ctx {
     uint64_t regs[12]; /* x19..x30 (x30=lr); slot i => reg x(19+i) */
     uint64_t sp;
