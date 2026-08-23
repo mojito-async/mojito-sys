@@ -9,6 +9,7 @@ CFLAGS  ?= -O2 -g -Wall -Wextra
 SPIKE   := spike/context_switch
 BUILD   := build
 DYLIB   := libmojito_spike.dylib
+MOJO    ?= mojo
 
 CSRCS := $(wildcard $(SPIKE)/*.c)
 SSRCS := $(wildcard $(SPIKE)/*.S)
@@ -17,7 +18,7 @@ OBJS  := $(patsubst $(SPIKE)/%.c,$(BUILD)/%.o,$(CSRCS)) \
 
 LIB_OBJS     := $(filter-out $(BUILD)/selftest.o,$(OBJS))
 SELFTEST_BIN := $(BUILD)/selftest
-
+.DELETE_ON_ERROR:
 .PHONY: all selftest test bench clean
 
 all: $(DYLIB) $(SELFTEST_BIN)
@@ -29,7 +30,7 @@ $(BUILD)/%.o: $(SPIKE)/%.c | $(BUILD)
 	$(CC) $(CFLAGS) -I$(SPIKE)/include -c $< -o $@
 
 $(BUILD)/%.o: $(SPIKE)/%.S | $(BUILD)
-	$(CC) -c $< -o $@
+	$(CC) -I$(SPIKE)/include -c $< -o $@
 
 $(DYLIB): $(LIB_OBJS)
 	$(CC) -dynamiclib -o $@ $^
@@ -42,10 +43,10 @@ selftest: $(SELFTEST_BIN)
 
 # Lanes #11/#12/#13 drive these; kept here so CONTRACT.md verification works.
 test: $(DYLIB)
-	./tests/spike/run.sh
+	MOJO=$(MOJO) ./tests/spike/run.sh
 
 bench: $(DYLIB)
-	mojo run benchmark/spike/bench_switch.mojo
+	$(MOJO) run benchmark/spike/bench_switch.mojo
 
 clean:
 	rm -rf $(BUILD) $(DYLIB)

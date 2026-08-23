@@ -16,11 +16,11 @@
 #include <unistd.h>
 
 #include <errno.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 static size_t g_page_size;
-static size_t g_last_total;
 
 /* Small base -> total-size registry so concurrent live stacks can each be
  * freed with only their base pointer. */
@@ -54,7 +54,14 @@ int ms_stack_alloc(size_t bytes, void **out_base, void **out_top) {
         return -1;
     }
 
-    size_t ps     = page_size();
+    size_t ps = page_size();
+    /* Rounding may add up to one page; the guard adds another. Reject
+     * requests whose total could overflow SIZE_MAX before doing any math. */
+    if (bytes > SIZE_MAX - 2 * ps) {
+        errno = EINVAL;
+        return -1;
+    }
+
     size_t usable = round_up(bytes == 0 ? ps : bytes, ps); /* >= 1 page */
     size_t total  = usable + ps;                           /* + guard page */
 
@@ -72,7 +79,6 @@ int ms_stack_alloc(size_t bytes, void **out_base, void **out_top) {
         return -1;
     }
 
-
     ms_reservation *slot = NULL;
     for (size_t i = 0; i < g_resv_len; ++i) {
         if (g_resv[i].base == NULL) {
@@ -83,8 +89,7 @@ int ms_stack_alloc(size_t bytes, void **out_base, void **out_top) {
     if (slot == NULL) {
         if (g_resv_len == g_resv_cap) {
             size_t cap = g_resv_cap ? g_resv_cap * 2 : 8;
-            ms_reservation *grown =
-                realloc(g_resv, cap * sizeof *g_resv);
+            ms_reservation *grown = realloc(g_resv, cap * sizeof *g_resv);
             if (grown == NULL) {
                 munmap(base, total);
                 errno = ENOMEM;
@@ -98,7 +103,6 @@ int ms_stack_alloc(size_t bytes, void **out_base, void **out_top) {
     slot->base  = base;
     slot->total = total;
 
-    g_last_total = total;
     *out_base = base;
     /* Highest usable address: end of the usable region. mmap returns a
      * page-aligned base, so this is 16-byte aligned by construction. */
@@ -113,8 +117,6 @@ void ms_stack_free(void *base) {
     for (size_t i = 0; i < g_resv_len; ++i) {
         if (g_resv[i].base == base) {
             munmap(base, g_resv[i].total);
-            if (g_last_total == g_resv[i].total && i + 1 == g_resv_len)
-                g_last_total = 0;
             g_resv[i].base  = NULL;
             g_resv[i].total = 0;
             return;
@@ -123,6 +125,10 @@ void ms_stack_free(void *base) {
 }
 
 size_t ms_stack_total_size(void) {
-    /* Reserved size of the most recent allocation, guard included. */
-    return g_last_total;
+    /* Sum of all live reservations, guard pages included. */
+    size_t total = 0;
+    for (size_t i = 0; i < g_resv_len; ++i)
+        if (g_resv[i].base != NULL)
+            total += g_resv[i].total;
+    return total;
 }

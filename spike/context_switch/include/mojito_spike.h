@@ -5,7 +5,7 @@
 
 typedef void (*ms_entry_fn)(void *userdata);
 
-/* Fixed-layout save area consumed by aarch64_switch.S. 22 x 8 bytes = 176. */
+/* Fixed-layout save area consumed by aarch64_switch.S. 13 x 8 bytes = 104. */
 typedef struct ms_ctx {
     uint64_t regs[12]; /* x19..x30 (x30=lr); slot i => reg x(19+i) */
     uint64_t sp;
