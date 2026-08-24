@@ -41,9 +41,9 @@ $(SELFTEST_BIN): $(BUILD)/selftest.o $(LIB_OBJS)
 selftest: $(SELFTEST_BIN)
 	./$(SELFTEST_BIN)
 
-# Lanes #11/#12/#13 drive these; kept here so CONTRACT.md verification works.
 test: $(DYLIB)
 	MOJO=$(MOJO) ./tests/spike/run.sh
+	MOJO=$(MOJO) ./tests/spike/run_t8_t14.sh
 
 bench: $(DYLIB)
 	$(MOJO) run -I $(SPIKE) -Xlinker $(DYLIB) benchmark/spike/bench_switch.mojo
