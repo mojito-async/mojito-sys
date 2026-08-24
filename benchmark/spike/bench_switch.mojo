@@ -6,11 +6,14 @@ b2-legal bindings in spike/context_switch/mojito_spike.mojo (#10):
 
   1. A->B->A round-trip throughput (round trips/sec) across >=1e6 rounds
      or a 2-second floor (whichever is reached last).
-  2. Single-switch latency percentiles (median / p95 / p99) from sampled
-     individual switches, plus the batch-derived mean per round trip.
+  2. Round-trip latency percentiles (median / p95 / p99) over sampled
+     A->B->A round trips, plus the batch-derived mean per round trip.
   3. Stack memory accounting for 1 / 100 / 1000 reserved stacks:
-     reserved bytes (incl. guard page, via ms_stack_total_size) versus
-     committed bytes (pages explicitly faulted by this benchmark).
+     reserved bytes measured as the live-sum delta of ms_stack_total_size
+     across the allocation loop (incl. each stack's guard page) versus
+     committed bytes (pages explicitly faulted by this benchmark), plus a
+     controlled-growth sweep showing committed bytes scaling with touch
+     depth while reservation stays flat.
 
 Methodology notes
 -----------------
@@ -24,29 +27,34 @@ Methodology notes
   every `ms_ctx_switch(main_ctx, bench_ctx)` call from the scheduler is
   exactly one full A->B->A round trip. The fiber-side counter is
   cross-checked against the scheduler-side count at the end.
-* Timing: gettimeofday() declared as a plain @extern against libSystem —
-  same mechanism as the spike bindings themselves. Resolution is 1 us,
-  which bounds single-switch latency percentiles from below; throughput is
-  measured batch-style over millions of rounds so resolution error is
-  negligible there. (mach_absolute_time was tried first and misbehaves
-  under the b2 JIT: see README "OS-level RSS and timing caveats".)
-* Latency sampling: every SAMPLING_SKIP-th switch is timed individually.
-  Sampled switches carry two extra clock reads, so they are upper bounds;
-  the batch-derived mean (total time / count) is the authoritative point
-  estimate, percentiles show distribution shape. Bucket width 25 ns.
+* Timing: wall-clock gettimeofday() declared as a plain @extern against
+  libSystem — same mechanism as the spike bindings themselves. Resolution
+  is 1 us, which bounds sampled round-trip percentiles from below;
+  throughput is measured batch-style over millions of rounds so resolution
+  error is negligible there. (mach_absolute_time was tried first and
+  misbehaves under the b2 JIT: see README timing caveats.)
+* Latency sampling: every SAMPLING_SKIP-th round trip is timed
+  individually. Sampled round trips carry two extra clock reads, so they
+  are upper bounds; the batch-derived mean (total time / count) is the
+  authoritative point estimate, percentiles show distribution shape.
 * Committed bytes are exact by construction: this benchmark touches exactly
-  one usable page per stack and counts it committed. A surviving run also
-  proves every guard page held for every allocation (a single guard miss
-  would SIGSEGV the benchmark).
+  the pages it counts as committed, nothing more. Guard pages are NOT
+  exercised here — touching one would SIGSEGV the benchmark by design;
+  guard behavior is covered by tests-b T13.
 * OS-level RSS is NOT reported from inside this process (see README,
   "OS-level RSS"): Mach task_info needs a 4-argument extern call, which
   mojo 1.0.0b2 inline asm cannot express yet. Capture RSS externally with
-  `ps -o rss=` sampling around the run.
+  a poller on the real pid (see README "OS-level RSS").
+* JIT fragility: this benchmark avoids the known b2 inline-asm/JIT traps
+  (see README); under heavy machine load the JIT can still crash
+  spuriously — re-run before diagnosing.
 
 Run (from repo root):
   mojo run -I spike/context_switch -Xlinker libmojito_spike.dylib \
-      -Xlinker /usr/lib/libSystem.B.dylib \
       benchmark/spike/bench_switch.mojo
+
+(externs for libc symbols resolve from the images already loaded in the
+process; no extra -Xlinker is needed)
 """
 
 from std.memory import stack_allocation
@@ -70,15 +78,6 @@ def _gettimeofday(
     tz: UnsafePointer[Byte, MutAnyOrigin],
 ) abi("C") -> Int:
     ...
-
-
-def _now_us(tv: UnsafePointer[Int, MutAnyOrigin]) -> Int:
-    """Epoch microseconds; tv must have >= 4 ints of scratch behind it."""
-    var tz = UnsafePointer[Byte, MutAnyOrigin](
-        unsafe_from_address=Int(tv) + 16
-    )
-    _ = _gettimeofday(tv, tz)
-    return tv[0] * 1000000 + tv[1]
 
 
 # --- tunables ------------------------------------------------------------
@@ -117,6 +116,15 @@ def bench_entry(ud: BytePtr) abi("C"):
         ms_ctx_switch(f[].bench_ctx, f[].main_ctx)
 
 
+def _now_us(tv: UnsafePointer[Int, MutAnyOrigin]) -> Int:
+    """Wall-clock epoch microseconds; tv needs >= 4 ints of scratch."""
+    var tz = UnsafePointer[Byte, MutAnyOrigin](
+        unsafe_from_address=Int(tv) + 16
+    )
+    _ = _gettimeofday(tv, tz)
+    return tv[0] * 1000000 + tv[1]
+
+
 def _percentile(
     buckets: UnsafePointer[Int64, MutUntrackedOrigin],
     total: Int,
@@ -137,15 +145,21 @@ def _percentile(
 def _memory_report[
     COUNT: Int
 ](page: Int) raises -> None:
-    """Reserved-vs-committed row for COUNT concurrently live stacks."""
+    """Reserved-vs-committed row for COUNT concurrently live stacks.
+
+    Reserved bytes are MEASURED as the live-sum delta of
+    ms_stack_total_size() across the allocation loop (the function returns
+    the total of all currently live stacks, not a per-stack size).
+    """
     var slots = stack_allocation[COUNT * 2, BytePtr]()
-    var reserved_per = ms_stack_total_size()
+    var before = ms_stack_total_size()
 
     var s = 0
     while s < COUNT:
         if ms_stack_alloc(STACK_BYTES, slots + s * 2, slots + s * 2 + 1) != 0:
             raise Error("FATAL: ms_stack_alloc failed")
         s += 1
+    var reserved_delta = ms_stack_total_size() - before
 
     # commit exactly one page per stack: touch lowest usable byte
     s = 0
@@ -157,7 +171,58 @@ def _memory_report[
         touch[0] = 88  # 'X': fault in the first usable page
         s += 1
 
-    print("|", COUNT, "|", reserved_per * COUNT, "|", COUNT * page, "|", COUNT, "|")
+    var per_stack_pages = reserved_delta // COUNT // page
+    print("|", COUNT, "|", reserved_delta, "|", per_stack_pages, "|", COUNT * page, "|")
+
+    s = 0
+    while s < COUNT:
+        ms_stack_free((slots + s * 2)[])
+        s += 1
+
+
+def _growth_report[
+    COUNT: Int
+](page: Int) raises -> None:
+    """Committed bytes under controlled growth: touch depth 1..4 pages.
+
+    Reservation stays flat while committed bytes scale linearly with the
+    number of pages deliberately faulted per stack. Depth is capped well
+    below the usable size so guard pages are never touched.
+    """
+    var slots = stack_allocation[COUNT * 2, BytePtr]()
+    var reserved_before = ms_stack_total_size()
+
+    var s = 0
+    while s < COUNT:
+        if ms_stack_alloc(STACK_BYTES, slots + s * 2, slots + s * 2 + 1) != 0:
+            raise Error("FATAL: ms_stack_alloc failed in growth report")
+        s += 1
+    var reserved_delta = ms_stack_total_size() - reserved_before
+
+    var stage = 0
+    var usable_pages = STACK_BYTES // page
+    while stage < 4:
+        var depth = 1
+        if stage == 1:
+            depth = 2
+        if stage == 2:
+            depth = 4
+        if stage == 3:
+            depth = 8
+        if depth > usable_pages:
+            break
+        s = 0
+        while s < COUNT:
+            # fault pages [top-depth*page, top): deeper stages re-touch
+            # already-committed pages plus exactly one new page each
+            var top_addr = Int((slots + s * 2 + 1)[])
+            var p = UnsafePointer[Int8, MutUntrackedOrigin](
+                unsafe_from_address=top_addr - depth * page
+            )
+            p[0] = 88 + Int8(depth)
+            s += 1
+        print("|", COUNT, "|", reserved_delta, "|", depth, "|", COUNT * depth * page, "|")
+        stage += 1
 
     s = 0
     while s < COUNT:
@@ -168,9 +233,6 @@ def _memory_report[
 # --- benchmark -------------------------------------------------------------
 def main() raises -> None:
     var tv = stack_allocation[4, Int]()
-    var tz = UnsafePointer[Byte, MutAnyOrigin](
-        unsafe_from_address=Int(tv) + 16
-    )
 
     print("# mojito-sys S0 context-switch benchmark")
     print()
@@ -232,7 +294,7 @@ def main() raises -> None:
     print("| mean_ns_per_switch_approx |", elapsed * 500 // rounds, "|")
     print()
 
-    print("## Single-switch latency (sampled)")
+    print("## Round-trip latency (sampled)")
     print()
     var buckets = stack_allocation[MAX_BUCKETS, Int64]()
     var i = 0
@@ -242,6 +304,7 @@ def main() raises -> None:
 
     var collected = 0
     var attempted = 0
+    var clamped = 0
     while collected < SAMPLE_TARGET:
         attempted += 1
         if attempted % SAMPLING_SKIP == 0:
@@ -251,6 +314,7 @@ def main() raises -> None:
             var b = ns // BUCKET_NS
             if b >= MAX_BUCKETS:
                 b = MAX_BUCKETS - 1
+                clamped += 1
             buckets[b] += 1
             collected += 1
         else:
@@ -261,21 +325,36 @@ def main() raises -> None:
     print("| p50 (median) |", _percentile(buckets, collected, 500), "|")
     print("| p95 |", _percentile(buckets, collected, 950), "|")
     print("| p99 |", _percentile(buckets, collected, 990), "|")
+    print("| samples_over_histogram_range |", clamped, "|")
     print()
-    print("_Sampled switches include two clock reads (upper bounds); see")
-    print("mean_ns_per_round_trip above for the batch-derived estimate._")
+    print("_Each sample is one full A->B->A round trip timed with two clock")
+    print("reads (upper bounds); see mean_ns_per_round_trip above for the")
+    print("batch-derived estimate. Bucket centers carry a +12 ns bias for")
+    print("sub-resolution (0 us) samples._")
     print()
 
     print("## Stack memory (reserved vs committed)")
     print()
-    print("_Committed = one explicitly faulted page per stack; a completed")
-    print("run also proves all guard pages held (any miss would SIGSEGV)._")
+    print("_Reserved = live-sum delta of ms_stack_total_size across each")
+    print("allocation loop. Committed = pages explicitly faulted per stack")
+    print("by this benchmark; guard pages are never touched here (guard")
+    print("behavior is covered by tests-b T13)._")
     print()
-    print("| stacks | reserved_bytes_incl_guard | committed_bytes | guard_pages_held |")
+    print("| stacks | reserved_bytes_incl_guard | reserved_pages_per_stack | committed_bytes |")
     print("|---|---|---|---|")
     _memory_report[1](page)
     _memory_report[100](page)
     _memory_report[1000](page)
+    print()
+
+    print("## Committed bytes under controlled growth (64 stacks)")
+    print()
+    print("_Same stacks re-measured as touch depth grows; reservation must")
+    print("stay flat while committed scales linearly._")
+    print()
+    print("| stacks | reserved_bytes_incl_guard | touch_depth_pages | committed_bytes |")
+    print("|---|---|---|---|")
+    _growth_report[64](page)
     print()
 
     # cross-check: every scheduler switch advanced the fiber counter once
