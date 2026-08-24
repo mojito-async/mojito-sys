@@ -28,9 +28,10 @@ say() { printf '%s\n' "$*"; }
 
 # ---------------------------------------------------------------- Tier 0 ----
 # 0.1 whitespace / trailing-whitespace errors in the staged diff
-if ! git diff --cached --check --quiet; then
+ws_errors=$(git diff --cached --check 2>&1)
+if [ -n "$ws_errors" ]; then
     say "Tier 0 FAIL: whitespace errors in staged diff:"
-    git diff --cached --check | sed 's/^/  | /'
+    printf '%s\n' "$ws_errors" | sed 's/^/  | /'
     failures=$((failures + 1))
 fi
 
