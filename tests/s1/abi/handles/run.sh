@@ -11,7 +11,7 @@
 set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../../.." && pwd)
 MOJO=${MOJO:-mojo}
 PKG_ROOT="$REPO_ROOT"
 
@@ -29,15 +29,14 @@ echo "S1 ABI opaque-native-handles matrix (issue #27):"
 # The test emits its own t1..t4 + RESULT rows; echo them verbatim.
 printf '%s\n' "$out" | grep -E '^(t[0-9]_|RESULT)' | sed 's/^/  /'
 
-if [ $status -ne 0 ]; then
-    echo "RESULT: toolchain error (exit=$status)"
-    printf '%s\n' "$out" | tail -n 12 | sed 's/^/  | /'
-    exit 1
-fi
-
 if printf '%s' "$out" | grep -q 'RESULT: all green'; then
     echo "RESULT: all green"
     exit 0
 fi
-echo "RESULT: FAILED"
+if printf '%s' "$out" | grep -q 'FAIL'; then
+    echo "RESULT: FAILED"
+    exit 1
+fi
+echo "RESULT: toolchain error (exit=$status)"
+printf '%s\n' "$out" | tail -n 12 | sed 's/^/  | /'
 exit 1
