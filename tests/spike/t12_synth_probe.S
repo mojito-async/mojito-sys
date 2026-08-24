@@ -9,10 +9,14 @@
  *
  * Scenario: allocate a fresh guarded stack, ms_ctx_make a context whose
  * entry writes known sentinel patterns BOTH into a heap scratch area and
- * into the region of its own stack just below SP, yields once, resumes,
- * verifies every sentinel at identical addresses, and exits through the
- * defined completion path (final switch back). The driver then frees the
- * stack and allocates a fresh one of the same size to prove clean reclaim.
+ * into the region of its own stack just below SP, records its SP, writes a
+ * completion marker, and RETURNS. Per contract v2 the trampoline must
+ * tail-switch back to the return context recorded at ms_ctx_switch time,
+ * so control lands at the scheduler's post-switch site; the scheduler then
+ * verifies the completion marker and every sentinel (stack canaries are
+ * read absolutely via B's recorded SP — proving the stack was neither moved
+ * nor scribbled by the completion path). The driver then frees the stack
+ * and allocates a fresh one of the same size to prove clean reclaim.
  *
  * Exported:
  *   Int32 t12_init(void)         0 = every required symbol resolved
@@ -23,10 +27,11 @@
  *                                nonzero = corruption/reclaim problem
  *
  * Bit map returned by t12_run:
- *   0..7   heap scratch sentinel k (shared+256+8k) corrupted
- *   8..15  own-stack sentinel k ([sp-64+8k]) corrupted
- *   16     sp changed across yield/resume round trip
+ *   0..7   heap scratch sentinel k (shared+512+8k) corrupted
+ *   8..15  own-stack sentinel k ([entry_sp-64+8k]) corrupted
+ *   16     entry did not record its sp
  *   17     sp not 16-byte aligned at trampoline->entry handoff
+ *   18     completion marker missing/wrong (completion path not exercised)
  */
 
 .section __TEXT,__cstring,cstring_literals
@@ -45,10 +50,12 @@ g_base:      .quad 0
 g_top:       .quad 0
 g_bytes:     .quad 0                    /* requested stack size */
 /* shared block handed to the synthetic context (malloc'd by t12_run):
- *   +0    main ctx save area
- *   +112  b ctx save area
- *   +224  mask
- *   +256  heap scratch: 64 bytes of sentinels
+ *   +0    main ctx save area (ms_ctx_t is 168 bytes in contract v2)
+ *   +192  b ctx save area
+ *   +384  mask / alignment seed
+ *   +432  entry-recorded SP
+ *   +440  completion marker
+ *   +512  heap scratch: 64 bytes of sentinels
  */
 g_shared:    .quad 0
 
@@ -200,14 +207,14 @@ _t12_run:
     stp x19, x20, [sp, #-16]!
     stp x21, x22, [sp, #-16]!
 
-    mov x20, x0
+    mov x20, x0                          /* top */
     mov x0, #1024
     bl  _malloc
     cbz x0, Lt12_run_fail
     mov x19, x0
     str xzr, [x19, #384]
 
-    /* ms_ctx_make(shared+112, top, t12_entry, shared) */
+    /* ms_ctx_make(shared+192, top, t12_entry, shared) */
     add x0, x19, #192
     mov x1, x20
     adrp x2, _t12_entry@PAGE
@@ -217,102 +224,27 @@ _t12_run:
     ldr x15, [x9, g_make@PAGEOFF]
     blr x15
 
-    /* enter B; yield; resume; final switch lands here */
-    mov x0, x19
-    add x1, x19, #192
-    adrp x9, g_switch@PAGE
-    ldr x15, [x9, g_switch@PAGEOFF]
-    blr x15
-    mov x0, x19
-    add x1, x19, #192
-    adrp x9, g_switch@PAGE
-    ldr x15, [x9, g_switch@PAGEOFF]
-    blr x15
-
-    ldr x21, [x19, #384]
-    mov x0, x19
-    bl  _free
-    mov x0, x21
-
-    ldp x21, x22, [sp], #16
-    ldp x19, x20, [sp], #16
-    ldp x29, x30, [sp], #16
-    ret
-
-Lt12_run_fail:
-    mov x0, #-1
-    ldp x21, x22, [sp], #16
-    ldp x19, x20, [sp], #16
-    ldp x29, x30, [sp], #16
-    ret
-
-/*
- * B-side entry. x0 = shared pointer, parked in x19.
- * Sentinel value for slot k: 0x5E12000000000000 + (k << 32) + k.
- */
-.globl _t12_entry
-.align 2
-_t12_entry:
-    mov x19, x0
-
-    /* alignment at handoff -> bit 17 */
-    mov x14, sp
-    tst x14, #15
-    cset x10, ne
-    lsl x10, x10, #17
-    str x10, [x19, #384]
-
-    /* heap scratch sentinels at shared+256 .. shared+312 */
-#define T12HEAP(k)                    \
-    movz x9, #(0x5E12);               \
-    movk x9, #(k), lsl #48;           \
-    movk x9, #(k), lsl #0;            \
-    str  x9, [x19, #(512 + k*8)]
-
-    T12HEAP(0)
-    T12HEAP(1)
-    T12HEAP(2)
-    T12HEAP(3)
-    T12HEAP(4)
-    T12HEAP(5)
-    T12HEAP(6)
-    T12HEAP(7)
-
-#undef T12HEAP
-
-    /* own-stack sentinels just below current SP: [sp-64] .. [sp-8].
-     * Below-SP memory on our own non-moving stack is unused scratch until
-     * we fill it; nothing else may touch these bytes while we are suspended.
-     */
-#define T12STACK(k)                   \
-    movz x9, #(0x5E50);               \
-    movk x9, #(k), lsl #48;           \
-    str  x9, [sp, #(-64 + k*8)]
-
-    T12STACK(0)
-    T12STACK(1)
-    T12STACK(2)
-    T12STACK(3)
-    T12STACK(4)
-    T12STACK(5)
-    T12STACK(6)
-    T12STACK(7)
-
-#undef T12STACK
-
-    /* remember SP for the round-trip equality check */
-    mov x14, sp
-    str x14, [x19, #432]
-
-    /* ---- yield ---- */
-    add x0, x19, #192
-    mov x1, x19
+    /* Enter B. The entry plants its evidence and then RETURNS; per contract
+     * v2 the trampoline must tail-switch back to the return context it
+     * recorded at ms_ctx_switch time, so control lands right here with B's
+     * stack still intact below its recorded SP. */
+    mov x0, x19                          /* from = main ctx */
+    add x1, x19, #192                    /* to   = b ctx    */
     adrp x9, g_switch@PAGE
     ldr x15, [x9, g_switch@PAGEOFF]
     blr x15
 
-    /* ---- resumed: verify everything ---- */
+    /* ---- landed back on the scheduler side: verify everything ---- */
     mov x11, xzr
+
+    /* completion marker -> bit 18 (entry must have completed cleanly) */
+    ldr x9, [x19, #440]
+    movz x10, #0xDE12
+    movk x10, #0x5EC0, lsl #16
+    cmp x9, x10
+    cset x10, ne
+    lsl x10, x10, #18
+    orr x11, x11, x10
 
     /* heap scratch -> bits 0..7 */
 #define T12CHKH(k)                    \
@@ -336,11 +268,14 @@ _t12_entry:
 
 #undef T12CHKH
 
-    /* own stack -> bits 8..15 (SP must be identical again) */
+    /* own-stack sentinels, read ABSOLUTELY via B's recorded SP -> bits
+     * 8..15. Reading them after the context has exited proves the stack
+     * memory was neither moved nor scribbled by the completion path. */
 #define T12CHKS(k)                    \
     movz x9, #(0x5E50);               \
     movk x9, #(k), lsl #48;           \
-    ldr  x10, [sp, #(-64 + k*8)];     \
+    ldr  x14, [x19, #432];            \
+    ldr  x10, [x14, #(-64 + k*8)];    \
     cmp  x10, x9;                     \
     cset x10, ne;                     \
     lsl  x10, x10, #(8+k);            \
@@ -357,22 +292,93 @@ _t12_entry:
 
 #undef T12CHKS
 
-    /* sp unchanged -> bit 16 */
-    mov x14, sp
+    /* recorded SP must be plausible (nonzero) -> bit 16 */
     ldr x9, [x19, #432]
-    cmp x14, x9
-    cset x10, ne
-    lsl x10, x10, #16
-    orr x11, x11, x10
+    cbnz x9, Lt12_sp_ok
+    orr x11, x11, #16
+Lt12_sp_ok:
 
     str x11, [x19, #384]
 
-    /* ---- final switch back to the scheduler (never returns here) ---- */
-    add x0, x19, #192
-    mov x1, x19
-    adrp x9, g_switch@PAGE
-    ldr x15, [x9, g_switch@PAGEOFF]
-    blr x15
+    ldr x21, [x19, #384]
+    mov x0, x19
+    bl  _free
+    mov x0, x21
 
-Lt12_entry_hang:                        /* unreachable */
-    b   Lt12_entry_hang
+    ldp x21, x22, [sp], #16
+    ldp x19, x20, [sp], #16
+    ldp x29, x30, [sp], #16
+    ret
+
+Lt12_run_fail:
+    mov x0, #-1
+    ldp x21, x22, [sp], #16
+    ldp x19, x20, [sp], #16
+    ldp x29, x30, [sp], #16
+    ret
+
+/*
+ * B-side entry. x0 = shared pointer, parked in x19.
+ * Plants all evidence and RETURNS — exercising the trampoline's defined
+ * completion path (tail-switch to the recorded return context).
+ */
+.globl _t12_entry
+.align 2
+_t12_entry:
+    mov x19, x0
+
+    /* alignment at handoff -> bit 17 */
+    mov x14, sp
+    tst x14, #15
+    cset x10, ne
+    lsl x10, x10, #17
+    str x10, [x19, #384]
+
+    /* remember SP so the scheduler can inspect our stack absolutely */
+    mov x14, sp
+    str x14, [x19, #432]
+
+    /* heap scratch sentinels at shared+512 .. shared+568 */
+#define T12HEAP(k)                    \
+    movz x9, #(0x5E12);               \
+    movk x9, #(k), lsl #48;           \
+    movk x9, #(k), lsl #0;            \
+    str  x9, [x19, #(512 + k*8)]
+
+    T12HEAP(0)
+    T12HEAP(1)
+    T12HEAP(2)
+    T12HEAP(3)
+    T12HEAP(4)
+    T12HEAP(5)
+    T12HEAP(6)
+    T12HEAP(7)
+
+#undef T12HEAP
+
+    /* own-stack sentinels just below current SP: [sp-64] .. [sp-8].
+     * Below-SP memory on our own non-moving stack is unused scratch until
+     * we fill it; nothing else may touch these bytes while the context is
+     * suspended or after it exits. */
+#define T12STACK(k)                   \
+    movz x9, #(0x5E50);               \
+    movk x9, #(k), lsl #48;           \
+    str  x9, [sp, #(-64 + k*8)]
+
+    T12STACK(0)
+    T12STACK(1)
+    T12STACK(2)
+    T12STACK(3)
+    T12STACK(4)
+    T12STACK(5)
+    T12STACK(6)
+    T12STACK(7)
+
+#undef T12STACK
+
+    /* completion marker: written last, checked by the scheduler */
+    movz x9, #0xDE12
+    movk x9, #0x5EC0, lsl #16
+    str x9, [x19, #440]
+
+    ret                                  /* completion path */

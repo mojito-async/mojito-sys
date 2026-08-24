@@ -8,8 +8,9 @@
 # Verified at three points — before entering the synthetic context, inside
 # it, and after resuming the scheduler:
 #   * pthread_self() thread identity, captured via libc;
-#   * TPIDRROEL0, the userspace-readable TLS base register Apple platforms
-#     use for _pthread TSD (read with MRS inside the probe);
+#   * TPIDR_EL0 (mrs 0xd53bd040), the userspace-readable TLS pointer
+#     register arm64 macOS bases _pthread TSD on (read inside the probe;
+#     observed stable read-to-read on this host);
 # plus a driver-level pthread_self equality check across the whole run.
 #
 # The spike dylib is dlopen()ed by name; if it is absent the test reports a
@@ -75,16 +76,16 @@ def main():
         print("T11 FAIL: pthread_self differs inside synthetic context vs pre-switch value")
         _c_exit(1)
     if mask & 2 != 0:
-        print("T11 FAIL: TPIDRROEL0 differs inside synthetic context vs pre-switch value")
+        print("T11 FAIL: TPIDR_EL0 differs inside synthetic context vs pre-switch value")
         _c_exit(1)
     if mask & 4 != 0:
         print("T11 FAIL: pthread_self differs after resume vs inside synthetic context")
         _c_exit(1)
     if mask & 8 != 0:
-        print("T11 FAIL: TPIDRROEL0 differs after resume vs inside synthetic context")
+        print("T11 FAIL: TPIDR_EL0 differs after resume vs inside synthetic context")
         _c_exit(1)
     if mask & 16 != 0:
         print("T11 FAIL: sp not 16-byte aligned at trampoline entry")
         _c_exit(1)
 
-    print("T11 PASS: pthread_self and TPIDRROEL0 identical before, during, and after context switches; sp 16-aligned at entry")
+    print("T11 PASS: pthread_self and TPIDR_EL0 identical before, during, and after context switches; sp 16-aligned at entry")

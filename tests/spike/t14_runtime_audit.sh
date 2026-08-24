@@ -9,13 +9,16 @@
 #
 # Method:
 #   1. Locate the dylib ($MOJITO_SPIKE_DYLIB overrides; else common paths).
-#   2. `nm -uU` its undefined symbols; every symbol must be either a system
-#      library symbol or a public mojito_spike/ms_* symbol.
+#   2. `nm -u` its undefined symbols; every symbol must be either a system
+#      library symbol or a public mojito_spike/ms_* symbol. (Plain `nm -u`:
+#      on Apple llvm-nm `-u -U` cancel out and would yield an empty, vacuous
+#      audit.)
 #   3. `nm -gU --defined-only` its exported symbols; nothing private may be
 #      exported either.
-#   4. Any symbol matching a private-runtime pattern (_MLIR/__mlir/__modart/
-#      modart/asyncRT/AsyncRT/async_rt/__mojo/_mojo/kgen/coroutine) is a FAIL,
-#      whether referenced or defined.
+#   4. Screening order per symbol: the private-runtime pattern is applied
+#      FIRST — a match is FORBIDDEN regardless of allow status. Symbols that
+#      match neither the allow-list nor the private pattern are reported as
+#      UNAUDITED[...] warnings instead of being silently dropped.
 #
 # Exit codes: 0 pass | 1 forbidden symbols found | 2 RED: dylib absent |
 #             3 tooling error.
@@ -48,32 +51,37 @@ command -v nm >/dev/null 2>&1 || { echo "T14 ERROR: nm not available"; exit 3; }
 undef=$(nm -uU "$lib" 2>/dev/null) || { echo "T14 ERROR: nm -uU failed"; exit 3; }
 defined=$(nm -gU --defined-only "$lib" 2>/dev/null) || { echo "T14 ERROR: nm failed on defined symbols"; exit 3; }
 
+undef=$(nm -u "$lib" 2>/dev/null) || { echo "T14 ERROR: nm -u failed"; exit 3; }
 # Symbols the spike is allowed to import: libc/libSystem/pthread/mach/dyld
 # surface plus its own public ABI.
-allow='^_(ms_|mach_|pthread|os_|dispatch|malloc|free|calloc|realloc|posix_memalign|mem[a-z]*$|str[a-z]*$|bzero|bcmp|close|open|read|write|mmap|munmap|mprotect|madvise|msync|mincore|sysconf|getpagesize|exit|abort|__stack_chk_|___stack_chk_|dyld|_dyld|objc|swift|kCF|CF[A-Z]|NS[a-z])'
-
+allow='^_?(ms_|mach_|pthread|os_|dispatch|malloc|free|calloc|realloc|posix_memalign|mem[a-z]*$|str[a-z]*$|bzero|bcmp|close|open|read|write|mmap|munmap|mprotect|madvise|msync|mincore|sysconf|getpagesize|exit|abort|__stack_chk_|dyld|objc|swift|kCF|CF[A-Z]|NS[a-z]|__error|fprintf|stderrp|stdoutp|stdinp)'
 private='_MLIR|__mlir|[Mm][Ll][Ii][Rr]|modart|[Aa]sync[Rr][Tt]|asyncrt|__mojo|_mojo|kgen|[Kk]gen|[Cc]oroutine|COROUTINE'
-
-
-# Extract bare symbol names from both lists and screen them.
 check_list() {
     _list="$1"
     _kind="$2"
-    printf '%s\n' "$_list" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[A-Za-z_$][A-Za-z0-9_$]*$/) print $i }' | sort -u | while IFS= read -r sym; do
+    printf '%s\n' "$_list" | awk 'length($0) > 2 { for (i = 1; i <= NF; i++) if ($i ~ /^[A-Za-z_$][A-Za-z0-9_$]{3,}$/) print $i }' | sort -u | while IFS= read -r sym; do
         [ "$sym" = "_" ] && continue
-        if ! printf '%s' "$sym" | grep -Eq "$allow"; then
-            if printf '%s' "$sym" | grep -Eq "$private"; then
-                echo "FORBIDDEN[$_kind] $sym"
-            fi
+        # Private-runtime pattern is applied FIRST: a match is forbidden
+        # regardless of allow status.
+        if printf '%s' "$sym" | grep -Eq "$private"; then
+            echo "FORBIDDEN[$_kind] $sym"
+        elif ! printf '%s' "$sym" | grep -Eq "$allow"; then
+            echo "UNAUDITED[$_kind] $sym"
         fi
     done
 }
 
-violations="$( { check_list "$undef" undefined; check_list "$defined" defined; } )"
+forbidden="$( { check_list "$undef" undefined; check_list "$defined" defined; } | grep '^FORBIDDEN' || true)"
+unaudited="$( { check_list "$undef" undefined; check_list "$defined" defined; } | grep '^UNAUDITED' || true )"
 
-if [ -n "$violations" ]; then
+if [ -n "$unaudited" ]; then
+    echo "T14 WARN: symbols matching neither the allow-list nor the private pattern:"
+    printf '%s\n' "$unaudited"
+fi
+
+if [ -n "$forbidden" ]; then
     echo "T14 FAIL: private Mojo/Modular runtime symbols detected:"
-    printf '%s\n' "$violations"
+    printf '%s\n' "$forbidden"
     exit 1
 fi
 

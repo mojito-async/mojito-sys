@@ -15,20 +15,25 @@
  *   void  t8_free(void)
  *   Int   t8_run(Int top)     corruption bitmask; 0 = all preserved
  *
- * t8_run scenario: the scheduler side makes context B on the guarded stack
- * via ms_ctx_make and enters it with ms_ctx_switch. B's entry fills x19-x28
- * and fp(x29) with per-register magic values, yields, records lr, yields
- * again, then verifies every register after resume and finally switches back.
- * The scheduler keeps its own bookkeeping (x19/x20) across switches — if the
- * implementation drops callee-saved state on EITHER side this surfaces as a
- * nonzero mask or an outright fault.
+ * Scenario: the scheduler side makes context B on the guarded stack via
+ * ms_ctx_make and enters it with ms_ctx_switch. BOTH sides are checked:
+ *
+ *   - B's entry fills x19-x28 and fp(x29) with per-register magic values,
+ *     yields twice (checking lr at each resume site), verifies every magic
+ *     after resume, and finally switches back.
+ *   - The scheduler poisons its own x19-x28 with anti-magic values before
+ *     EVERY switch and re-verifies them after every return. An impl that
+ *     omits saving/restoring the main context's callee-saved GPRs therefore
+ *     trips bits 14-23 instead of passing vacuously (a do-nothing switch
+ *     would otherwise leave B's magics untouched in registers).
  *
  * Bit map returned by t8_run:
- *   0..9   x19..x28 corrupted
- *   10     fp (x29) corrupted
+ *   0..9   x19..x28 corrupted inside B
+ *   10     fp (x29) corrupted inside B
  *   11     lr (x30) corrupted (checked at both resume sites)
  *   12     sp not 16-byte aligned at trampoline->entry handoff
  *   13     sp not 16-byte aligned at post-switch resume
+ *   14..23 main-context x19..x28 poison lost (scheduler side)
  */
 
 .section __TEXT,__cstring,cstring_literals
@@ -46,10 +51,10 @@ g_switch:    .quad 0                    /* ms_ctx_switch */
 g_base:      .quad 0                    /* allocation base */
 g_top:       .quad 0                    /* initial SP */
 /* shared block handed to the synthetic context (malloc'd by t8_run):
- *   +0    main ctx save area (ms_ctx_t needs 104 bytes; slack included)
- *   +112  b ctx save area
- *   +224  corruption mask written by entry before final switch
- *   +232  initial SP (informational)
+ *   +0    main ctx save area (ms_ctx_t is 168 bytes in contract v2)
+ *   +192  b ctx save area
+ *   +384  corruption mask written by entry before final switch
+ *   +392  initial SP (informational)
  */
 g_shared:    .quad 0
 
@@ -75,6 +80,65 @@ g_shared:    .quad 0
     cset x10, ne
     lsl  x10, x10, #\bit
     orr  x11, x11, x10
+.endm
+
+/* POISON r, n — fill register r with an anti-magic value for slot n.
+ * Deliberately distinct from SETREG values so a do-nothing switch cannot
+ * confuse "B's magic survived" with "main's poison survived".
+ * Layout: [63:48]=0xDEAD [47:32]=0xBAD0+n [31:16]=0x1234 [15:0]=0xA000+n */
+.macro POISON r, n
+    movz \r, #(0xA000 + \n)
+    movk \r, #0x1234, lsl #16
+    movk \r, #(0xBAD0 + \n), lsl #32
+    movk \r, #0xDEAD, lsl #48
+.endm
+
+/* CHKPOISON r, n — accumulate mismatch vs poison into x11 at bit 14+n.
+ * (Scheduler-side poison bits are fixed at 14..23.) Clobbers x9/x10. */
+.macro CHKPOISON r, n
+    movz x9, #(0xA000 + \n)
+    movk x9, #0x1234, lsl #16
+    movk x9, #(0xBAD0 + \n), lsl #32
+    movk x9, #0xDEAD, lsl #48
+    cmp  \r, x9
+    cset x10, ne
+    lsl  x10, x10, #(14 + \n)
+    orr  x11, x11, x10
+.endm
+
+.macro POISONALL
+    POISON x19, 0
+    POISON x20, 1
+    POISON x21, 2
+    POISON x22, 3
+    POISON x23, 4
+    POISON x24, 5
+    POISON x25, 6
+    POISON x26, 7
+    POISON x27, 8
+    POISON x28, 9
+.endm
+
+/* CHKPOISONALL base_bit — verify all ten poisons and OR mismatch bits
+ * base_bit+0..9 into the mask at [shared+384]. Reloads shared itself;
+ * clobbers x9-x11, x16. */
+.macro CHKPOISONALL base
+    mov  x11, xzr
+    CHKPOISON x19, 0
+    CHKPOISON x20, 1
+    CHKPOISON x21, 2
+    CHKPOISON x22, 3
+    CHKPOISON x23, 4
+    CHKPOISON x24, 5
+    CHKPOISON x25, 6
+    CHKPOISON x26, 7
+    CHKPOISON x27, 8
+    CHKPOISON x28, 9
+    adrp x16, g_shared@PAGE
+    ldr  x9, [x16, g_shared@PAGEOFF]
+    ldr  x10, [x9, #384]
+    orr  x10, x10, x11
+    str  x10, [x9, #384]
 .endm
 
 /* Int32 t8_init(void) -> 0 when every required symbol resolved */
@@ -154,7 +218,9 @@ _t8_free:
     ldp x29, x30, [sp], #16
     ret
 
-/* Int t8_run(Int top) -> corruption bitmask (0 = all preserved) */
+/* Int t8_run(Int top) -> corruption bitmask (0 = all preserved).
+ * Callee-saved x19-x28 are poisoned/restored around this function for our
+ * caller; all scheduler bookkeeping lives in memory, not across switches. */
 .globl _t8_run
 .extern _malloc
 .extern _free
@@ -168,15 +234,17 @@ _t8_run:
     stp x25, x26, [sp, #-16]!
     stp x27, x28, [sp, #-16]!
 
-    mov x20, x0                          /* top */
-    mov x0, #1024                         /* shared block size */
+    mov x20, x0                          /* top (used only below) */
+    mov x0, #1024                        /* shared block size */
     bl  _malloc
     cbz x0, Lt8_run_fail
-    mov x19, x0                          /* shared; must survive switches */
-    str xzr, [x19, #384]                 /* result = 0 */
-    str x20, [x19, #392]                 /* informational */
+    adrp x16, g_shared@PAGE
+    str x0, [x16, g_shared@PAGEOFF]      /* shared = malloc'd block */
+    str xzr, [x0, #384]                  /* result = 0 */
+    str x20, [x0, #392]                  /* informational */
 
-    /* ms_ctx_make(shared+112, top, t8_entry, shared) */
+    /* ms_ctx_make(shared+192, top, t8_entry, shared) */
+    mov x19, x0
     add x0, x19, #192
     mov x1, x20
     adrp x2, _t8_entry@PAGE
@@ -186,30 +254,50 @@ _t8_run:
     ldr x15, [x9, g_make@PAGEOFF]
     blr x15
 
-    /* enter B; B runs until its first yield */
-    mov x0, x19                          /* from = main ctx (shared+0)   */
-    add x1, x19, #192                    /* to   = B ctx     (shared+192) */
+    /* enter B; poison first so the main ctx saves poisoned state */
+    POISONALL
+    adrp x9, g_shared@PAGE
+    ldr x0, [x9, g_shared@PAGEOFF]       /* from = main ctx (shared+0)   */
+    adrp x9, g_shared@PAGE
+    ldr x1, [x9, g_shared@PAGEOFF]
+    add x1, x1, #192                     /* to   = b ctx     (shared+192) */
     adrp x9, g_switch@PAGE
     ldr x15, [x9, g_switch@PAGEOFF]
     blr x15
-    /* resumed after yield#1; resume B so it can record lr and yield again */
-    mov x0, x19
-    add x1, x19, #192
+Lt8_sched1:
+    /* resumed after yield#1: poisons must have survived the round trip */
+    CHKPOISONALL 14
+    /* poison again and resume B: if the impl failed to save B's regs at
+     * its yield, B sees this fresh poison instead of its magics */
+    POISONALL
+    adrp x9, g_shared@PAGE
+    ldr x0, [x9, g_shared@PAGEOFF]
+    adrp x9, g_shared@PAGE
+    ldr x1, [x9, g_shared@PAGEOFF]
+    add x1, x1, #192
     adrp x9, g_switch@PAGE
     ldr x15, [x9, g_switch@PAGEOFF]
     blr x15
-    /* resumed after yield#2; resume B for the verification phase. B's final
-     * switch lands here with the mask stored at shared+224. */
-    mov x0, x19
-    add x1, x19, #192
+Lt8_sched2:
+    CHKPOISONALL 14
+    POISONALL
+    adrp x9, g_shared@PAGE
+    ldr x0, [x9, g_shared@PAGEOFF]
+    adrp x9, g_shared@PAGE
+    ldr x1, [x9, g_shared@PAGEOFF]
+    add x1, x1, #192
     adrp x9, g_switch@PAGE
     ldr x15, [x9, g_switch@PAGEOFF]
     blr x15
+Lt8_sched3:
+    CHKPOISONALL 14
 
-    ldr x21, [x19, #384]                 /* mask */
-    mov x0, x19
-    bl  _free
+    adrp x9, g_shared@PAGE
+    ldr x21, [x9, g_shared@PAGEOFF]
+    ldr x22, [x21, #384]                 /* mask */
     mov x0, x21
+    bl  _free
+    mov x0, x22
 
     ldp x27, x28, [sp], #16
     ldp x25, x26, [sp], #16
@@ -232,9 +320,9 @@ Lt8_run_fail:
 /*
  * B-side entry. x0 = shared pointer.
  *
- * Register discipline: x19-x28 all carry magic payloads under test and libc
- * scratch registers cannot be assumed valid across ms_ctx_switch, so every
- * global access reloads its own adrp and nothing else is cached.
+ * Register discipline: x19-x28 all carry magic payloads under test, so no
+ * register value (incl. cached adrp results in x16/x17) may be assumed
+ * valid across ms_ctx_switch; every global access reloads its own adrp.
  */
 .globl _t8_entry
 .align 2
@@ -261,7 +349,7 @@ _t8_entry:
     SETREG x28, 9
     movz x29, #0x501C                    /* fp magic */
 
-    /* ---- yield #1: from = B (+112), to = main (+0) ---- */
+    /* ---- yield #1: from = B (+192), to = main (+0) ---- */
     adrp x16, g_shared@PAGE
     ldr  x0, [x16, g_shared@PAGEOFF]
     add  x0, x0, #192
@@ -327,7 +415,7 @@ Lt8_ret2:
     lsl  x10, x10, #13
     orr  x11, x11, x10
 
-    /* store verdict */
+    /* store verdict (reload shared; x9 was clobbered by the fp check) */
     adrp x16, g_shared@PAGE
     ldr  x9, [x16, g_shared@PAGEOFF]
     str  x11, [x9, #384]
