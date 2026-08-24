@@ -86,17 +86,19 @@ def t3_dispose_idempotent() -> Bool:
 # T4 — BorrowedFd never closes: the descriptor stays open even after the
 # borrowed wrapper leaves scope (a borrow holds no ownership).
 # ----------------------------------------------------------------------------
+def wrap_borrowed(raw: Int32) -> Bool:
+    # One call frame: a borrowed wrapper is born and dies here; it carries no
+    # ownership, so it must not close anything.
+    var _ = BorrowedFd(raw)
+    return is_open(raw)
+
+
 def t4_borrowed_never_closes() -> Bool:
     var raw = fresh_fd()
-    # `wrap_borrowed` both witnesses liveness while the wrapper is alive and
-    # lets the wrapper be destroyed before we re-probe at `is_open(raw)`.
+    # Witness liveness while the wrapper is alive, then let the wrapper be
+    # destroyed and re-probe: a borrow must never close.
     var alive_while_borrowed = wrap_borrowed(raw)
     return alive_while_borrowed and is_open(raw)
-
-
-def wrap_borrowed(raw: Int32) -> Bool:
-    var b = BorrowedFd(raw)
-    return is_open(raw)
 
 
 # ---------------------------------------------------------------------------
