@@ -10,7 +10,7 @@
 # dylib. The real sysconf-based mjs_granularity in native/posix/mjs_page.c
 # (this lane) turns the suite green.
 #
-# Usage: tests/s1/memory-page/run.sh        (or: make test-s1 from repo root)
+# Usage: tests/s1/memory/page/run.sh     (or: make test-s1 from repo root)
 #   MOJO=/path/to/mojo overrides the compiler.
 #
 # Expects libmojito_sys.dylib to be built (make test-s1 builds it first).
@@ -18,7 +18,7 @@
 set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../../.." && pwd)
 MOJO=${MOJO:-mojo}
 DYLIB="$REPO_ROOT/libmojito_sys.dylib"
 

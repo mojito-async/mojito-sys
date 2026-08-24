@@ -9,14 +9,14 @@
 #   - both read consistently (two consecutive calls agree) — the query is
 #     informational and must not drift between calls.
 #
-# This file is red (cannot link) until mjs_granularity exists in
-# libmojito_sys.dylib — the expected TDD-red state for this lane.
+# The wrappers widen the C int results to Int (size_t-aligned byte counts),
+# so all comparisons here are Int arithmetic.
 
 from mojito_sys.memory.page import allocation_granularity, page_size
 
 
-# True iff x is a power of two and x >= 4096.
-def is_plausible_page_size(x: Int32) -> Bool:
+# True iff x is a plausible host page size: a power of two and >= 4096.
+def is_plausible_page_size(x: Int) -> Bool:
     return (x >= 4096) and ((x & (x - 1)) == 0)
 
 
@@ -28,11 +28,15 @@ def main() raises:
     var g1 = allocation_granularity()
     var g2 = allocation_granularity()
 
+    # H3: an implausible page size is terminal — the granularity divisor
+    # check below would otherwise be meaningless.
     if is_plausible_page_size(ps1):
         print("S1 page_size > 0, power-of-two, >=4096: PASS")
     else:
         print("S1 page_size > 0, power-of-two, >=4096: FAIL (page_size=" + String(ps1) + ")")
         failed += 1
+        print("RESULT: " + String(failed) + " FAILED")
+        raise Error("S1 page conformance failed: implausible page_size")
 
     if ps1 == ps2:
         print("S1 page_size stable across calls:       PASS")
@@ -46,6 +50,7 @@ def main() raises:
         print("S1 granularity >= page size:            FAIL (gran=" + String(g1) + " page=" + String(ps1) + ")")
         failed += 1
 
+    # Guard divisor: only meaningful once ps1 is plausible (enforced above).
     if (g1 >= 4096) and (g1 % ps1) == 0:
         print("S1 granularity is page multiple:        PASS")
     else:
