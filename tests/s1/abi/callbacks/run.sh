@@ -4,18 +4,13 @@
 # Runs the callback-token conformance test and prints a PASS/FAIL matrix.
 # Exits nonzero on failure or missing prerequisites.
 #
-# The package scaffold (mojito_sys/__init__.mojo, mojito_sys/abi/__init__.mojo)
-# is owned by the S1Build lane; until that lane merges, this suite reports
-# FAIL (unresolvable import) even though callbacks.mojo is present. That is
-# the expected TDD-red state: the build lane landing makes it green.
-#
 # Usage: tests/s1/abi/callbacks/run.sh
 #   MOJO=/path/to/mojo overrides the compiler.
 
 set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../../.." && pwd)
 MOJO=${MOJO:-mojo}
 
 TESTS="conformance_test"
@@ -26,6 +21,18 @@ if ! command -v "$MOJO" >/dev/null 2>&1; then
         echo "$t FAIL (toolchain unavailable)"
     done
     exit 2
+fi
+
+# The package scaffold (mojito_sys/__init__.mojo, mojito_sys/abi/__init__.mojo)
+# is owned by the S1Build lane and lands in its PR. Until it merges, this
+# suite stays red (expected TDD-red); the guard makes the cause explicit
+# instead of a silent "cannot resolve package" import error.
+if [ ! -d "$REPO_ROOT/mojito_sys" ]; then
+    echo "ERROR: $REPO_ROOT/mojito_sys missing; S1Build package scaffold not merged yet."
+    for t in $TESTS; do
+        echo "$t FAIL (package scaffold absent)"
+    done
+    exit 1
 fi
 
 failures=0
