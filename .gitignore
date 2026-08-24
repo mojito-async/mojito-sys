@@ -3,9 +3,10 @@
 *.mojoc
 *.o
 *.a
-.so
-.dylib
-.mojolang-cache/
+*.so
+*.dylib
+/build/
+tests/spike/.build/
 
 # Spike local outputs
 spike/context_switch/out/
