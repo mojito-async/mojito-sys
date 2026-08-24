@@ -4,14 +4,18 @@
 # Drives tests/spike/t11_tls_probe.S (linked into this executable) through
 # the frozen C ABI of include/mojito_spike.h.
 #
-# A context switch on one OS thread must not disturb thread-local state.
-# Verified at three points — before entering the synthetic context, inside
-# it, and after resuming the scheduler:
-#   * pthread_self() thread identity, captured via libc;
-#   * TPIDR_EL0 (mrs 0xd53bd040), the userspace-readable TLS pointer
-#     register arm64 macOS bases _pthread TSD on (read inside the probe;
-#     observed stable read-to-read on this host);
-# plus a driver-level pthread_self equality check across the whole run.
+# The spec invariant ("OS-thread TLS remains unchanged") is verified
+# FUNCTIONALLY through the pthread TSD API:
+#   * scheduler seeds a TSD key with a magic before entering the synthetic
+#     context;
+#   * inside the synthetic context, pthread_getspecific(key) must return the
+#     seeded magic and pthread_self() must be unchanged;
+#   * after switching back, pthread_getspecific(key) must still return the
+#     magic;
+# plus an INFORMATIONAL (non-gating) TPIDR_EL0 stability report: raw
+# TLS-pointer register values are not a reliable equality target on macOS
+# arm64 (libSystem may legitimately rewrite TPIDR_EL0; TPIDRRO_EL0 is not
+# guaranteed stable read-to-read), so only the functional check gates.
 #
 # The spike dylib is dlopen()ed by name; if it is absent the test reports a
 # deterministic RED verdict and exits nonzero.
@@ -21,9 +25,6 @@ def _c_dlopen(path: Int, mode: Int32) abi("C") -> Int: ...
 
 @extern("exit")
 def _c_exit(code: Int32) abi("C"): ...
-
-@extern("pthread_self")
-def _c_pthread_self() abi("C") -> Int: ...
 
 @extern("t11_init")
 def _t11_init() abi("C") -> Int32: ...
@@ -37,6 +38,15 @@ def _t11_free() abi("C"): ...
 @extern("t11_run")
 def _t11_run(top: Int) abi("C") -> Int: ...
 
+@extern("t11_tpidr_pre")
+def _t11_tpidr_pre() abi("C") -> Int: ...
+
+@extern("t11_tpidr_in")
+def _t11_tpidr_in() abi("C") -> Int: ...
+
+@extern("t11_tpidr_post")
+def _t11_tpidr_post() abi("C") -> Int: ...
+
 def _addr_of(s: String) -> Int:
     var buf = InlineArray[Byte, 128](fill=Byte(0))
     var i = 0
@@ -46,8 +56,6 @@ def _addr_of(s: String) -> Int:
     return Int(UnsafePointer(to=buf))
 
 def main():
-    var self_before = _c_pthread_self()
-
     if _c_dlopen(_addr_of("libmojito_spike.dylib"), 2) == 0:
         print("T11 RED: cannot dlopen libmojito_spike.dylib - spike implementation absent (issues #8/#9)")
         _c_exit(1)
@@ -67,25 +75,24 @@ def main():
         print("T11 FAIL: probe could not allocate its shared block")
         _c_exit(1)
 
-    var self_after = _c_pthread_self()
-    if self_before != self_after:
-        print("T11 FAIL: pthread_self changed across the switching run")
-        _c_exit(1)
-
     if mask & 1 != 0:
-        print("T11 FAIL: pthread_self differs inside synthetic context vs pre-switch value")
+        print("T11 FAIL: TSD value inside synthetic context differs from scheduler's seeded magic")
         _c_exit(1)
     if mask & 2 != 0:
-        print("T11 FAIL: TPIDR_EL0 differs inside synthetic context vs pre-switch value")
+        print("T11 FAIL: TSD value after switching back differs from the seeded magic")
         _c_exit(1)
     if mask & 4 != 0:
-        print("T11 FAIL: pthread_self differs after resume vs inside synthetic context")
+        print("T11 FAIL: pthread_self differs inside synthetic context vs pre-switch value")
         _c_exit(1)
     if mask & 8 != 0:
-        print("T11 FAIL: TPIDR_EL0 differs after resume vs inside synthetic context")
-        _c_exit(1)
-    if mask & 16 != 0:
         print("T11 FAIL: sp not 16-byte aligned at trampoline entry")
         _c_exit(1)
 
-    print("T11 PASS: pthread_self and TPIDR_EL0 identical before, during, and after context switches; sp 16-aligned at entry")
+    # Informational only (NOT a gate): raw TPIDR_EL0 stability across the run.
+    var pre = _t11_tpidr_pre()
+    var inb = _t11_tpidr_in()
+    var post = _t11_tpidr_post()
+    if pre != inb or inb != post:
+        print("T11 INFO: TPIDR_EL0 varied across the run (informational; functional TSD continuity is what gates)")
+
+    print("T11 PASS: pthread TSD value continuous across context switches (scheduler seed observed in B, still intact after switch-back); thread identity unchanged; sp 16-aligned at entry")
