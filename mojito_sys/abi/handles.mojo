@@ -3,36 +3,48 @@
 # Spec §7.2 (opaque handles) and §25 (fds; ownership: move transfers, destroy
 # closes exactly once, borrowed never closes).
 #
+# Module placement note (spec §4): this harness live under abi/ so it can be
+# imported early by the S1 lanes; the fd wrappers (OwnedFd/BorrowedFd) are
+# expected to migrate up to io/handle.mojo once the io/ package lands.  The
+# opaque-pointer and ownership semantics are unchanged by that move.
+#
 # Ownership model (public contract):
 #   - OpaqueNativeHandle is a raw pointer-sized handle to native state the
 #     wrapper does not own.  It exposes a null sentinel (address 0) and a
-#     borrow() of the raw pointer; it never frees the referent.
+#     pointer() that COPIES the address; the caller must not retain or free
+#     the referent through it.
 #   - OwnedFd owns a POSIX file descriptor.  A move (`^`) transfers ownership
 #     to the destination, and the moved-from source is destroyed WITHOUT
 #     closing (ownership transfer suppresses the source destructor).
-#     dispose()/the destructor close EXACTLY ONCE, guarded by a monotone
-#     flag: _disposed goes false->true at most once, which is what makes a
-#     double-dispose externally detectable from the struct's own state and a
-#     repeat dispose() a no-op.
-#   - BorrowedFd references a descriptor it does not own.  It has NO
-#     destructor, so it can never close anything; the underlying descriptor
-#     remains the caller's to manage.
+#     dispose()/the destructor close EXACTLY ONCE: dispose() commits the
+#     close (sets the monotone flag + resets to NO_FD) only when close(2)
+#     reports success (rc == 0).  On a nonzero rc the flag stays clear so the
+#     caller may retry dispose() (bounded retry; EINTR-safe by contract).  A
+#     repeat dispose() after success is a no-op.
+#   - detach() surrenders the descriptor to the caller without closing;
+#     the OwnedFd is then inert (is_null, is_disposed, and its destructor is
+#     a no-op).
+#   - BorrowedFd references a descriptor it does not own; it has NO
+#     destructor and never closes.
 #
-# Only the platform C ABI is used (libc close); no mojito dylib is required.
-# The helper below is file-private; the public surface is the three structs.
+# Thread-safety (spec §25): dispose()/__del__/detach() are NOT thread-safe.
+# Callers must serialize access to a single OwnedFd instance.
+#
+# Only the platform C ABI is used (libc symbol close/fcntl/dup); the ms_
+# Mojo-side names avoid clashing with Mojo stdlib's own close bindings.
 
 from std.memory.unsafe_pointer import UnsafePointer
 
 comptime HandlePtr = UnsafePointer[NoneType, MutUntrackedOrigin]
 
-# Sentinel for "no descriptor" / moved-from / already-reset OwnedFd values.
+# Sentinel for "no descriptor" / moved-from / disposed / detached.
 comptime NO_FD: Int32 = -1
 
 # ---------------------------------------------------------------------------
 # POSIX close(2) via the C ABI.  Returns 0 on success, -1/errno on failure.
 # ---------------------------------------------------------------------------
 @extern("close")
-def _fd_close(fd: Int32) abi("C") -> Int32:
+def ms_close(fd: Int32) abi("C") -> Int32:
     ...
 
 
@@ -55,9 +67,9 @@ struct OpaqueNativeHandle:
     def is_null(self) -> Bool:
         return Int(self.ptr) == 0
 
-    # Return the underlying pointer WITHOUT handing off ownership or
-    # lifetime: the caller must not dispose what it does not own.
-    def borrow(self) -> HandlePtr:
+    # Returns the raw address.  This is a COPY, not a transfer: the caller
+    # must not keep or free the referent through the returned pointer.
+    def pointer(self) -> HandlePtr:
         return self.ptr
 
 
@@ -83,25 +95,47 @@ struct OwnedFd(Movable):
     def is_null(self) -> Bool:
         return self.fd < 0
 
+    # Current descriptor, or NO_FD once disposed/detached/moved-from.
     def get(self) -> Int32:
         return self.fd
 
     def is_disposed(self) -> Bool:
         return self._disposed
 
-    # Close exactly once.  A repeat dispose() is a no-op (the monotone flag
-    # is already set), so a double-dispose cannot close a descriptor that the
-    # OS has reissued to something else.
-    def dispose(mut self):
-        if not self._disposed:
-            self._disposed = True
-            _ = _fd_close(self.fd)
+    # A safe, non-owning view of the current descriptor; the returned
+    # BorrowedFd has no destructor and never closes.
+    def borrow(self) -> BorrowedFd:
+        return BorrowedFd(self.fd)
 
-    # Destructor: close only if the caller has not explicitly disposed.  On a
+    # Close exactly once.  On success (rc == 0) the descriptor is closed, the
+    # monotone flag is set, and the held fd resets to NO_FD; a repeat
+    # dispose() is then a no-op returning 0.  On a nonzero rc (including
+    # EINTR) the flag stays clear and the fd is unchanged, so the caller may
+    # retry.  Destructor callers ignore the status.
+    def dispose(mut self) -> Int32:
+        if self._disposed:
+            return 0
+        var rc = ms_close(self.fd)
+        if rc == 0:
+            self._disposed = True
+            self.fd = NO_FD
+        return rc
+
+    # Detach the descriptor from the owned value WITHOUT closing: the caller
+    # takes ownership of the returned fd.  This OwnedFd is then inert
+    # (is_disposed == true, get() == NO_FD, destructor is a no-op).
+    def detach(mut self) -> Int32:
+        var retained = self.fd
+        self.fd = NO_FD
+        self._disposed = True
+        return retained
+
+    # Destructor: close unless the caller already disposed/detached.  On a
     # moved-from source the compiler suppresses this destructor (ownership
-    # moved to the destination), which is what makes a move a transfer.
+    # moved to the destination), which is what makes a move a transfer.  The
+    # returned status is deliberately unused on the destructor path.
     def __del__(deinit self):
-        self.dispose()
+        _ = self.dispose()
 
 
 # ---------------------------------------------------------------------------

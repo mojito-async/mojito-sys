@@ -6,11 +6,19 @@
 # Runs with the platform libc only (no bundled dylib):
 #   mojo run -I <repo-root> handles_test.mojo
 #
-# Descriptor liveness is probed with fcntl(F_GETFD): 0 = open, -1 = closed.
-# This makes "closed exactly once" externally testable: after dispose() frees
-# the descriptor's number, a fresh low-fd allocation reuses that same number,
-# so a second close (double-dispose, or a moved-from destructor) would have
-# killed the reused slot.
+# Descriptor liveness is probed with fcntl(F_GETFD): a descriptor is open
+# when the call returns >= 0 (-1 = no such fd).  Slot reuse is deterministic
+# only under a single-threaded process with few descriptors, which this suite
+# assumes and states: the lowest-free slot allocation is what lets us prove
+# "closed exactly once" by reissuing the same number after a close and
+# re-probing liveness (a stale second close would kill the reissued slot).
+# Do not parallelize these checks.
+#
+# T2 reframe: a move is a transfer, so the receiver closes exactly once and
+# the moved-from source's destructor is suppressed by the compiler (the
+# ownership contract, guaranteed structurally — not by counting).  The
+# slot-reuse probe runs only AFTER both wrapper frames have unwound (see
+# move_and_dispose) so the single close is what the fresh allocation sees.
 
 from mojito_sys.abi.handles import (
     BorrowedFd,
@@ -23,18 +31,18 @@ comptime F_GETFD: Int32 = 1
 
 
 @extern("fcntl")
-def fd_fcntl(fd: Int32, cmd: Int32, arg: Int32) abi("C") -> Int32:
+def ms_fcntl(fd: Int32, cmd: Int32, arg: Int32) abi("C") -> Int32:
     ...
 
 
 # Real open descriptor via the C ABI (lowest-free allocation).
 def fresh_fd() -> Int32:
-    return fd_fcntl(0, F_DUPFD, 0)
+    return ms_fcntl(0, F_DUPFD, 0)
 
 
-# True when `fd` is still open (no close() consumed this descriptor).
+# True when `fd` is currently open (no close() consumed this descriptor).
 def is_open(fd: Int32) -> Bool:
-    return fd_fcntl(fd, F_GETFD, 0) == 0
+    return ms_fcntl(fd, F_GETFD, 0) >= 0
 
 
 # ----------------------------------------------------------------------------
@@ -46,39 +54,45 @@ def t1_null_handle() -> Bool:
 
 
 # ----------------------------------------------------------------------------
-# T2 — move keeps the value; ownership transfers so the moved-from source
-# never closes, and the descriptor is closed exactly once (by the receiver).
+# T2 — move keeps the value and closes exactly once.  The move + receiver
+# dispose run inside a helper; by the time it returns both the moved-from
+# source and the receiver are out of scope (destructors have run), so the
+# reissued slot proves the receiver's single close left the fresh allocation
+# alive.
 # ----------------------------------------------------------------------------
-def t2_move_keeps_value() -> Bool:
-    var src = OwnedFd(fresh_fd())
-    var raw = src.get()  # the raw descriptor value the wrapper holds.
-    var dst = src^       # move: value keeps across transfer, `src` is moved-from.
+def move_and_dispose(raw: Int32) -> Bool:
+    var src = OwnedFd(raw)
+    var dst = src^  # move: src is moved-from, dst owns `raw`.
     if dst.get() != raw:
         return False
-    # Only the receiver may dispose.  Closing once frees `raw`'s slot.
-    dst.dispose()
-    # A fresh low-fd allocation reuses `raw`'s number; a would-be second close
-    # (double-dispose or leaked source destructor) would leave it dead.
+    var rc = dst.dispose()  # receiver closes exactly once
+    return (rc == 0) and dst.is_disposed()
+
+
+def t2_move_keeps_value() -> Bool:
+    var raw = fresh_fd()
+    var disposed_cleanly = move_and_dispose(raw)
+    # Both wrapper frames have unwound. A fresh low-fd allocation reuses
+    # `raw`'s number and must still be live (only one close happened).
     var probe = fresh_fd()
-    return is_open(probe) and (probe == raw)
+    return disposed_cleanly and is_open(probe) and (probe == raw)
 
 
 # ----------------------------------------------------------------------------
-# T3 — dispose is an idempotent flag: the second dispose() is a no-op, so the
-# descriptor is closed exactly once.
+# T3 — dispose is an idempotent flag: the second dispose() is a no-op, so
+# the descriptor is closed exactly once.
 # ----------------------------------------------------------------------------
 def t3_dispose_idempotent() -> Bool:
     var o = OwnedFd(fresh_fd())
-    o.dispose()
-    if not o.is_disposed():
+    var rc1 = o.dispose()
+    if rc1 != 0 or not o.is_disposed():
         return False
-    # First dispose freed the descriptor's slot; an idempotent SECOND dispose
-    # must not close whatever now occupies that number.
+    # First dispose freed the descriptor's slot and reset this owner to NO_FD.
     var again = OwnedFd(fresh_fd())
     var slot = again.get()
-    o.dispose()  # repeat MUST be a no-op.
-    var ok = is_open(again.get()) and is_open(slot)
-    again.dispose()
+    var rc2 = o.dispose()  # repeat MUST be a no-op returning 0.
+    var ok = (rc2 == 0) and is_open(again.get()) and is_open(slot)
+    _ = again.dispose()
     return ok
 
 
@@ -95,42 +109,64 @@ def wrap_borrowed(raw: Int32) -> Bool:
 
 def t4_borrowed_never_closes() -> Bool:
     var raw = fresh_fd()
-    # Witness liveness while the wrapper is alive, then let the wrapper be
-    # destroyed and re-probe: a borrow must never close.
     var alive_while_borrowed = wrap_borrowed(raw)
-    return alive_while_borrowed and is_open(raw)
+    var still_open_after = is_open(raw)
+    # Now the test itself owns the descriptor: close it once so nothing leaks.
+    var owner = OwnedFd(raw)
+    var rc = owner.dispose()
+    return alive_while_borrowed and still_open_after and (rc == 0)
+
+
+# ----------------------------------------------------------------------------
+# T5 — borrow() is a safe non-owning view and detach() surrenders ownership:
+# detach() leaves the OwnedFd inert and hands the caller a live fd to close.
+# ----------------------------------------------------------------------------
+def t5_borrow_and_detach() -> Bool:
+    var raw = fresh_fd()
+    var own = OwnedFd(raw)
+    var borrowed = own.borrow()
+    if borrowed.get() != raw or borrowed.is_null():
+        return False
+    var fd_out = own.detach()          # caller takes ownership; `own` becomes inert
+    if not own.is_disposed() or not own.is_null():
+        return False
+    var ok = is_open(fd_out)           # detach did NOT close
+    var owner = OwnedFd(fd_out)        # close it once via an owned wrapper
+    var rc = owner.dispose()
+    return ok and (rc == 0) and (fd_out == raw)
 
 
 # ---------------------------------------------------------------------------
 
 
 def main() raises:
-    var t1 = t1_null_handle()
-    var t2 = t2_move_keeps_value()
-    var t3 = t3_dispose_idempotent()
-    var t4 = t4_borrowed_never_closes()
+    var names = [
+        "t1_null_handle",
+        "t2_move_keeps_value",
+        "t3_dispose_idempotent",
+        "t4_borrowed_never_closes",
+        "t5_borrow_and_detach",
+    ]
     var failures = 0
-    if t1:
-        print("t1_null_handle: PASS")
-    else:
-        print("t1_null_handle: FAIL")
-        failures += 1
-    if t2:
-        print("t2_move_keeps_value: PASS")
-    else:
-        print("t2_move_keeps_value: FAIL")
-        failures += 1
-    if t3:
-        print("t3_dispose_idempotent: PASS")
-    else:
-        print("t3_dispose_idempotent: FAIL")
-        failures += 1
-    if t4:
-        print("t4_borrowed_never_closes: PASS")
-    else:
-        print("t4_borrowed_never_closes: FAIL")
-        failures += 1
-
+    for i in range(5):
+        var ok = call_test(i + 1)
+        print(names[i] + ": " + ("PASS" if ok else "FAIL"))
+        if not ok:
+            failures += 1
     print("RESULT: " + ("all green" if failures == 0 else String(failures) + " FAILED"))
     if failures != 0:
         raise Error("handles: " + String(failures) + " test(s) FAILED")
+
+
+def call_test(i: Int) -> Bool:
+    if i == 1:
+        return t1_null_handle()
+    elif i == 2:
+        return t2_move_keeps_value()
+    elif i == 3:
+        return t3_dispose_idempotent()
+    elif i == 4:
+        return t4_borrowed_never_closes()
+    elif i == 5:
+        return t5_borrow_and_detach()
+    return False
