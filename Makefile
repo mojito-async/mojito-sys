@@ -46,7 +46,7 @@ test: $(DYLIB)
 	MOJO=$(MOJO) ./tests/spike/run.sh
 
 bench: $(DYLIB)
-	$(MOJO) run benchmark/spike/bench_switch.mojo
+	$(MOJO) run -I $(SPIKE) -Xlinker $(DYLIB) benchmark/spike/bench_switch.mojo
 
 clean:
 	rm -rf $(BUILD) $(DYLIB)
