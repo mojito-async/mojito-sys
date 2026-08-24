@@ -5,7 +5,8 @@
 *.a
 .so
 .dylib
-.mojolang-cache/
+/build/
+tests/spike/.build/
 
 # Spike local outputs
 spike/context_switch/out/
