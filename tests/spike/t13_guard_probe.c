@@ -82,6 +82,10 @@ int t13_run(size_t bytes)
         return 5;
     }
     if (pid == 0) {
+        /* Detach from any runtime-installed fault handlers so the
+         * deliberate fault takes the platform default action cleanly. */
+        signal(SIGSEGV, SIG_DFL);
+        signal(SIGBUS, SIG_DFL);
         /* Child: write into the middle of the guard page [base, base+ps).
          * This MUST raise a synchronous protection fault (SIGBUS on macOS
          * arm64, SIGSEGV elsewhere); reaching _exit means the guard page was

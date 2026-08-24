@@ -44,7 +44,7 @@ g_base:      .quad 0
 g_top:       .quad 0
 g_entry_sp:  .quad 0
 g_resume_sp: .quad 0
-/* shared block: +0 main ctx, +112 b ctx, +224 mask */
+/* shared block: +0 main ctx (168B), +192 b ctx, +384 mask */
 g_shared:    .quad 0
 
 .text

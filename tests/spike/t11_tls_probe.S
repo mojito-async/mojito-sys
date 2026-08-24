@@ -7,11 +7,16 @@
  * Mojo driver dlopen()s libmojito_spike.dylib.
  *
  * A context switch on ONE OS thread must not disturb thread-local state:
- * the thread identity (pthread_self) and the TLS pointer register
- * (TPIDRROEL0, the userspace-readable TLS base Apple platforms use for
- * _pthread TSD) must be identical before, during (inside the synthetic
- * context), and after a suspend/resume round trip. This probe captures both
- * values at all three points and compares them.
+ * the thread identity (pthread_self) and the userspace-readable TLS pointer
+ * register TPIDR_EL0 (mrs 0xd53bd040; Apple platforms base _pthread TSD on
+ * it) must be identical before, during (inside the synthetic context), and
+ * after a suspend/resume round trip. This probe captures both values at all
+ * three points and compares them.
+ *
+ * Observed on this host (macOS arm64, M-series): TPIDR_EL0 reads are stable
+ * across calls within a thread, so register equality is a valid continuity
+ * signal here; TPIDRRO_EL0 was avoided because its userspace value is not
+ * guaranteed stable read-to-read under Apple's userspace hardening.
  *
  * Exported:
  *   Int32 t11_init(void)       0 = every required symbol resolved
@@ -21,9 +26,9 @@
  *
  * Bit map returned by t11_run:
  *   0   pthread_self inside B differs from pre-switch value
- *   1   TPIDRROEL0 inside B differs from pre-switch value
+ *   1   TPIDR_EL0 inside B differs from pre-switch value
  *   2   pthread_self at post-resume differs from in-B value
- *   3   TPIDRROEL0 at post-resume differs from in-B value
+ *   3   TPIDR_EL0 at post-resume differs from in-B value
  *   4   sp not 16-byte aligned at trampoline->entry handoff
  */
 
@@ -46,7 +51,7 @@ g_top:       .quad 0
  *   +112  b ctx save area
  *   +224  mask
  *   +232  pthread_self captured by scheduler before entering
- *   +240  TPIDRROEL0 captured by scheduler before entering
+ *   +400  TPIDR_EL0 captured by scheduler before entering
  */
 g_shared:    .quad 0
 
@@ -147,7 +152,7 @@ _t11_run:
     /* scheduler-side pre-capture: thread identity + TLS base */
     bl  _pthread_self
     str x0, [x19, #400]
-    .inst 0xd53bd040                    /* mrs x0, TPIDRROEL0 */
+    .inst 0xd53bd040                    /* mrs x0, TPIDR_EL0 */
     str x0, [x19, #408]
     str xzr, [x19, #384]
 
@@ -206,7 +211,7 @@ _t11_entry:
     /* capture pair inside B */
     bl  _pthread_self                   /* -> x0 */
     mov x21, x0
-    .inst 0xd53bd041                    /* mrs x1, TPIDRROEL0 */
+    .inst 0xd53bd040                    /* mrs x1, TPIDR_EL0 */
 
     /* compare with scheduler's pre-capture -> bits 0,1 */
     ldr x9,  [x19, #400]
@@ -236,7 +241,7 @@ _t11_entry:
     /* ---- resumed: capture third pair, compare vs in-B -> bits 2,3 ---- */
     bl  _pthread_self
     mov x21, x0
-    .inst 0xd53bd041                    /* mrs x1, TPIDRROEL0 */
+    .inst 0xd53bd040                    /* mrs x1, TPIDR_EL0 */
     ldr x11, [x19, #384]
     ldr x9,  [x19, #416]
     cmp x21, x9
