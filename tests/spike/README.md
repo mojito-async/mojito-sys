@@ -60,3 +60,129 @@ repeat runs are deterministic.
   destructors are declared `def __del__(deinit self)`; module-level mutable
   globals don't exist, so all cross-context observations travel through the
   userdata frame pointer.
+
+---
+
+# S0 spike semantic tests — T8–T14 (tests-b lane, issue #12)
+
+Semantic tests T8–T14 from `docs/mojito-sys_IMPLEMENTATION_SPEC.md` §6.5.
+Originally landed as the TDD **red** deliverables (deterministic RED verdicts
+while `libmojito_spike.dylib` was absent); all seven now run GREEN against the
+merged implementation (main @ b7d1055).
+
+## Design
+
+Each `.mojo` driver is AOT-built (`mojo build`) together with its probe —
+an asm/C helper linked statically into the same executable:
+
+| Test | Driver | Probe | What it proves |
+|---|---|---|---|
+| T8 | `t8_gpr_preservation.mojo` | `t8_gpr_probe.S` | x19–x28, fp(x29), lr(x30) preserved across `ms_ctx_switch`; sp 16-aligned at entry/resume |
+| T9 | `t9_simd_preservation.mojo` | `t9_simd_probe.S` | d8–d15 (low 64 bits of v8–v15) preserved bit-exactly |
+| T10 | `t10_stack_alignment.mojo` | `t10_align_probe.S` | sp 16-aligned at trampoline entry + post-switch resume; sp stable; Mojo frames 16-aligned pre/post switch |
+| T11 | `t11_tls_continuity.mojo` | `t11_tls_probe.S` | functional pthread-TSD continuity: seeded TSD magic observed inside B and intact after switch-back; `pthread_self()` unchanged. Raw TPIDR_EL0 reads are captured informationally only (not stable equality targets on macOS arm64). |
+| T12 | `t12_synthetic_stack.mojo` | `t12_synth_probe.S` | fresh context enters/exits via completion path; heap + own-stack sentinels intact; equal-size free/realloc cycle clean |
+| T13 | `t13_guard_page.mojo` | `t13_guard_probe.c` | top-of-stack byte writable; deliberate write into the PROT_NONE guard page raises a controlled protection fault (SIGBUS on macOS arm64, SIGSEGV elsewhere) in a forked child |
+| T14 | `t14_runtime_audit.sh` | — | `nm -u`/`nm -gU` audit: no private Mojo/Modular runtime symbols referenced or exported by the spike dylib |
+
+Probes contain **no link-time references to the spike**: the drivers
+`dlopen("libmojito_spike.dylib")` first, probes resolve `ms_*` symbols with
+`dlsym(RTLD_DEFAULT)` afterwards. A missing/incomplete implementation is
+therefore a clean `RED` message plus nonzero exit — never a crash or a link
+error. When the implementation lands, the same commands turn green without
+modification. All probe→spike calls go through the frozen C ABI
+(`include/mojito_spike.h`, CONTRACT.md); the Mojo layer proves a Mojo-driven
+harness can orchestrate the whole scenario above that boundary.
+
+## Building and running
+
+```sh
+OUT=tests/spike/.build   # build artifacts live here; safe to rm -rf
+mkdir -p "$OUT"
+
+# T8
+clang -arch arm64 -c tests/spike/t8_gpr_probe.S      -o "$OUT/t8_gpr_probe.o"
+mojo build tests/spike/t8_gpr_preservation.mojo -o "$OUT/t8" \
+    -Xlinker "$OUT/t8_gpr_probe.o"
+DYLD_LIBRARY_PATH=<dir-with-libmojito_spike.dylib> "$OUT/t8"
+
+# T9
+clang -arch arm64 -c tests/spike/t9_simd_probe.S     -o "$OUT/t9_simd_probe.o"
+mojo build tests/spike/t9_simd_preservation.mojo -o "$OUT/t9" \
+    -Xlinker "$OUT/t9_simd_probe.o"
+DYLD_LIBRARY_PATH=<...> "$OUT/t9"
+
+# T10
+clang -arch arm64 -c tests/spike/t10_align_probe.S   -o "$OUT/t10_align_probe.o"
+mojo build tests/spike/t10_stack_alignment.mojo -o "$OUT/t10" \
+    -Xlinker "$OUT/t10_align_probe.o"
+DYLD_LIBRARY_PATH=<...> "$OUT/t10"
+
+# T11
+clang -arch arm64 -c tests/spike/t11_tls_probe.S     -o "$OUT/t11_tls_probe.o"
+mojo build tests/spike/t11_tls_continuity.mojo -o "$OUT/t11" \
+    -Xlinker "$OUT/t11_tls_probe.o"
+DYLD_LIBRARY_PATH=<...> "$OUT/t11"
+
+# T12
+clang -arch arm64 -c tests/spike/t12_synth_probe.S   -o "$OUT/t12_synth_probe.o"
+mojo build tests/spike/t12_synthetic_stack.mojo -o "$OUT/t12" \
+    -Xlinker "$OUT/t12_synth_probe.o"
+DYLD_LIBRARY_PATH=<...> "$OUT/t12"
+
+# T13 (C helper)
+clang -arch arm64 -c tests/spike/t13_guard_probe.c   -o "$OUT/t13_guard_probe.o"
+mojo build tests/spike/t13_guard_page.mojo -o "$OUT/t13" \
+    -Xlinker "$OUT/t13_guard_probe.o"
+DYLD_LIBRARY_PATH=<...> "$OUT/t13"
+
+# T14 (script; needs only the dylib)
+tests/spike/t14_runtime_audit.sh
+MOJITO_SPIKE_DYLIB=/path/to/libmojito_spike.dylib tests/spike/t14_runtime_audit.sh
+```
+
+Exit codes per test binary/script: `0` = PASS, `1` = RED/FAIL verdict
+(message says which), T14 additionally uses `2` for "dylib not found".
+
+## How T13 executes
+
+T13 exercises real memory-protection semantics, so it uses one small C
+helper, `t13_guard_probe.c`, linked into the test executable:
+
+1. Parent allocates a guarded stack via the spike's `ms_stack_alloc`
+   (guard page = `[base, base+page_size)` as `PROT_NONE`) and verifies the
+   single highest usable byte below `out_top` is writable.
+2. It then `fork()`s; the child deliberately stores one byte into the middle
+   of the guard page.
+3. The parent reaps the child and requires `WIFSIGNALED` with
+   `WTERMSIG == SIGBUS or SIGSEGV` (macOS arm64 delivers SIGBUS for accesses
+   to an existing PROT_NONE page). A child that *survives* means the guard
+   page was absent or writable — i.e. silent adjacent-memory corruption —
+   and fails the test.
+4. The stack is freed afterwards.
+
+The fork isolates the deliberate fault: the driver process itself stays
+healthy, which is what "controlled" means here — the platform's page
+protection turns overflow into an immediate contained fault.
+
+## How T14 executes
+
+`t14_runtime_audit.sh` audits the compiled artifact, no execution of the
+switch machinery involved:
+
+1. Locates `libmojito_spike.dylib` (env override `MOJITO_SPIKE_DYLIB`, else
+   common repo paths).
+2. Screens **undefined** symbols (`nm -uU`) and **exported** symbols
+   (`nm -gU --defined-only`). System-library imports (libc/libSystem,
+   pthread, mach, malloc/mem*, mmap family, …) and the public `ms_*` ABI are
+   allow-listed; any symbol matching private Modular/Mojo runtime patterns
+   (`_MLIR/__mlir/modart/asyncRT/kgen/coroutine/__mojo…`) — referenced *or*
+   defined — is reported as `FORBIDDEN[...]` and fails the test.
+3. Today it exits `2` (RED) because the dylib does not exist yet.
+
+## Ownership note
+
+Everything in this directory matching `t[89]_*.mojo` / `t1[0-4]_*.*` belongs
+to issue #12 (lane B). The `run.sh` integration target and tests T1–T7 are
+owned by tests lane A (issue #11); once lane A's `make test` harness lands,
+these seven tests slot in behind the build commands above.
