@@ -2,9 +2,7 @@
 *.mojopkg
 *.mojoc
 *.o
-*.a
-.so
-.dylib
+**.dylib
 /build/
 tests/spike/.build/
 
