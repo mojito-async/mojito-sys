@@ -6,12 +6,19 @@
 # The alternate context constructs a probe resource and then hits an ordinary
 # Mojo error BEFORE ever suspending; unwinding must destroy the resource exactly
 # once and no context switch may be recorded.
-#
-# Red-phase note: imports frozen mojito_spike names; fails until #8/#9/#10 land.
 
-from mojito_spike import ms_ctx_make, ms_ctx_switch, ms_stack_alloc, ms_stack_free
+from std.memory import stack_allocation
 
-comptime CTX_SLOTS = 22
+from mojito_spike import (
+    BytePtr,
+    MS_CTX_SIZE,
+    entry_pointer,
+    ms_ctx_make,
+    ms_ctx_switch,
+    ms_stack_alloc,
+    ms_stack_free,
+)
+
 comptime STACK_BYTES = 262144
 
 
@@ -36,12 +43,11 @@ struct Resource:
 
 
 struct Frame:
-    var self_ctx: UnsafePointer[Byte, MutAnyOrigin]
-    var back_ctx: UnsafePointer[Byte, MutAnyOrigin]
+    var self_ctx: BytePtr
+    var back_ctx: BytePtr
     var counters: UnsafePointer[Counters, MutAnyOrigin]
     var error_message: String
     var yields_seen: Int
-    var finished: Bool
 
     def __init__(out self):
         self.self_ctx = UnsafePointer[Byte, MutAnyOrigin](unsafe_from_address=1)
@@ -49,11 +55,6 @@ struct Frame:
         self.counters = UnsafePointer[Counters, MutAnyOrigin](unsafe_from_address=1)
         self.error_message = ""
         self.yields_seen = 0
-        self.finished = False
-
-
-def byte_ptr(p: UnsafePointer[Int, MutAnyOrigin]) -> UnsafePointer[Byte, MutAnyOrigin]:
-    return p.bitcast[Byte]()
 
 
 def failing_chain(depth: Int) raises:
@@ -70,14 +71,14 @@ def guarded_phase(fp: UnsafePointer[Frame, MutAnyOrigin]) raises:
     ms_ctx_switch(fp[].self_ctx, fp[].back_ctx)  # must never run
 
 
-def alt_entry(ud: UnsafePointer[Byte, MutAnyOrigin]):
+@export("t5_alt_entry")
+def alt_entry(ud: BytePtr) abi("C"):
     var fp = ud.bitcast[Frame]()
     try:
         guarded_phase(fp)
     except e:
         fp[].error_message = String(e)
-
-    fp[].finished = True
+    # Hand control back one last time; main treats this as completion.
     ms_ctx_switch(fp[].self_ctx, fp[].back_ctx)
 
 
@@ -85,21 +86,16 @@ def main() raises:
     var ok = True
     var reason = "ok"
 
-    var base = UnsafePointer[Byte, MutAnyOrigin](unsafe_from_address=1)
-    var top = UnsafePointer[Byte, MutAnyOrigin](unsafe_from_address=1)
-    if ms_stack_alloc(
-        STACK_BYTES,
-        UnsafePointer[UnsafePointer[Byte, MutAnyOrigin], MutAnyOrigin](to=base),
-        UnsafePointer[UnsafePointer[Byte, MutAnyOrigin], MutAnyOrigin](to=top),
-    ) != 0:
+    var slots = stack_allocation[2, BytePtr]()
+    if ms_stack_alloc(STACK_BYTES, slots, slots + 1) != 0:
         ok = False
         reason = "ms_stack_alloc failed"
 
     if ok:
-        var main_buf = InlineArray[Int, CTX_SLOTS](fill=0)
-        var alt_buf = InlineArray[Int, CTX_SLOTS](fill=0)
-        var main_ctx = byte_ptr(UnsafePointer[Int, MutAnyOrigin](to=main_buf[0]))
-        var alt_ctx = byte_ptr(UnsafePointer[Int, MutAnyOrigin](to=alt_buf[0]))
+        var main_buf = stack_allocation[MS_CTX_SIZE // 8, Int]()
+        var alt_buf = stack_allocation[MS_CTX_SIZE // 8, Int]()
+        var main_ctx = main_buf.bitcast[Byte]()
+        var alt_ctx = alt_buf.bitcast[Byte]()
 
         var cs = Counters()
         var frame = Frame()
@@ -108,7 +104,7 @@ def main() raises:
         frame.counters = UnsafePointer[Counters, MutAnyOrigin](to=cs)
         var frame_p = UnsafePointer[Frame, MutAnyOrigin](to=frame).bitcast[Byte]()
 
-        ms_ctx_make(alt_ctx, top, alt_entry, frame_p)
+        ms_ctx_make(alt_ctx, (slots + 1)[], entry_pointer["t5_alt_entry"](), frame_p)
         # Single entry: ALT errors before yielding and hands straight back.
         ms_ctx_switch(main_ctx, alt_ctx)
 
@@ -129,7 +125,7 @@ def main() raises:
                 + String(cs.dtor)
             )
 
-        ms_stack_free(base)
+        ms_stack_free(slots[])
 
     print("T5 raises-before-yield cleanup: " + ("PASS" if ok else "FAIL (" + reason + ")"))
     if not ok:

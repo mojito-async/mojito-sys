@@ -20,49 +20,43 @@ implementing the mandatory tests **S0-T1 … S0-T7** from
 ## Running
 
 ```sh
-tests/spike/run.sh            # PASS/FAIL matrix, nonzero exit on any FAIL
-MOJO=/path/to/mojo tests/spike/run.sh
+make test                  # repo root: builds libmojito_spike.dylib, then:
+#   tests/spike/run.sh     # PASS/FAIL matrix, nonzero exit on any FAIL
+MOJO=/path/to/mojo make test
 ```
 
-The harness compiles/runs each test with `mojo run -I spike/context_switch`,
-so tests import the frozen `mojito_spike` bindings directly.
+The harness links each test against `libmojito_spike.dylib`
+(`mojo run -Xlinker …`) with `-I spike/context_switch`, so tests import the
+real frozen `mojito_spike` bindings.
 
-## Current status: RED (expected)
-
-All seven tests fail today because lanes #8/#9/#10 have not landed:
+## Status: GREEN
 
 ```text
-t1_address_stability          FAIL
-t2_borrowed_refs              FAIL
-t3_destructor_exactness       FAIL
-t4_raise_after_resume         FAIL
-t5_raise_before_yield_cleanup FAIL
-t6_repeated_switching         FAIL
-t7_nested_depth               FAIL
+t1_address_stability          PASS
+t2_borrowed_refs              PASS
+t3_destructor_exactness       PASS
+t4_raise_after_resume         PASS
+t5_raise_before_yield_cleanup PASS
+t6_repeated_switching         PASS
+t7_nested_depth               PASS
+
+RESULT: all green (exit 0)
 ```
 
-This is the intended TDD red state of this PR; it goes green after central
-merges and the `wip` label comes off then.
+Verified against mojo 1.0.0b2 + `libmojito_spike.dylib` from lanes #8/#9/#10;
+repeat runs are deterministic.
 
-## API notes for lane #10 (mojito_spike.mojo) and reviewers
+## Implementation notes
 
-Tests were written against Mojo **1.0.0b2** and validated to compile and run
-against a scratch stub exposing exactly these shapes (stub NOT part of this
-repo):
-
-* Pointer types require origins on b2: raw byte pointers appear as
-  `UnsafePointer[Byte, MutAnyOrigin]`. The pre-#16 contract spellings
-  (`UnsafePointer[Byte]`) do not compile on b2.
-* The frozen `ms_ctx_make(ctx, stack_top, entry, userdata)` accepts the entry
-  as a plain named Mojo function; b2 has no public function→pointer cast, so
-  the b2-legal formulation is expected to take `entry` through a generic
-  parameter (e.g. `[Entry: AnyType]`) or an equivalent mechanism owned by #10.
-  Tests pass their trampoline as the bare `alt_entry` function value in the
-  third positional slot.
+* Entry callbacks follow the #10 mechanism: each test declares its trampoline
+  as `@export("tN_alt_entry") def alt_entry(ud: BytePtr) abi("C")` and passes
+  `entry_pointer["tN_alt_entry"]()` to `ms_ctx_make`.
+* Context save areas are `stack_allocation[MS_CTX_SIZE // 8, Int]()` blocks
+  bitcast to `BytePtr`; stack out-slots are `stack_allocation[2, BytePtr]()`.
+* Raising helpers (`T4`/`T5`) are plain `raises` defs invoked under
+  `try/except` inside the non-raising C-ABI callback, so unwinding happens
+  entirely on the synthetic stack.
 * Constants use `comptime NAME = ...` (`alias` is deprecated on b2);
   destructors are declared `def __del__(deinit self)`; module-level mutable
   globals don't exist, so all cross-context observations travel through the
   userdata frame pointer.
-
-If #10 lands a different entry mechanism, only the single `ms_ctx_make(...)`
-call line per test needs adjusting.

@@ -3,12 +3,19 @@
 # Spec §6.5: resume a suspended frame and raise an ordinary Mojo error after
 # resumption; verify normal propagation through the pre-existing Mojo call
 # chain, plus correct cleanup of live values on the resumed stack.
-#
-# Red-phase note: imports frozen mojito_spike names; fails until #8/#9/#10 land.
 
-from mojito_spike import ms_ctx_make, ms_ctx_switch, ms_stack_alloc, ms_stack_free
+from std.memory import stack_allocation
 
-comptime CTX_SLOTS = 22
+from mojito_spike import (
+    BytePtr,
+    MS_CTX_SIZE,
+    entry_pointer,
+    ms_ctx_make,
+    ms_ctx_switch,
+    ms_stack_alloc,
+    ms_stack_free,
+)
+
 comptime STACK_BYTES = 262144
 comptime CHAIN_DEPTH = 5
 
@@ -34,13 +41,12 @@ struct Resource:
 
 
 struct Frame:
-    var self_ctx: UnsafePointer[Byte, MutAnyOrigin]
-    var back_ctx: UnsafePointer[Byte, MutAnyOrigin]
+    var self_ctx: BytePtr
+    var back_ctx: BytePtr
     var counters: UnsafePointer[Counters, MutAnyOrigin]
     var error_message: String
     var cleanup_ok: Bool
     var yields_seen: Int
-    var finished: Bool
 
     def __init__(out self):
         self.self_ctx = UnsafePointer[Byte, MutAnyOrigin](unsafe_from_address=1)
@@ -49,11 +55,6 @@ struct Frame:
         self.error_message = ""
         self.cleanup_ok = False
         self.yields_seen = 0
-        self.finished = False
-
-
-def byte_ptr(p: UnsafePointer[Int, MutAnyOrigin]) -> UnsafePointer[Byte, MutAnyOrigin]:
-    return p.bitcast[Byte]()
 
 
 # Ordinary Mojo call chain living entirely on the synthetic stack. The raise
@@ -76,15 +77,15 @@ def guarded_phase(fp: UnsafePointer[Frame, MutAnyOrigin]) raises:
     fp[].cleanup_ok = False
 
 
-def alt_entry(ud: UnsafePointer[Byte, MutAnyOrigin]):
+@export("t4_alt_entry")
+def alt_entry(ud: BytePtr) abi("C"):
     var fp = ud.bitcast[Frame]()
     try:
         guarded_phase(fp)
     except e:
         fp[].error_message = String(e)
         fp[].cleanup_ok = fp[].counters[].ctor == 1 and fp[].counters[].dtor == 1
-
-    fp[].finished = True
+    # Hand control back one last time; main treats this as completion.
     ms_ctx_switch(fp[].self_ctx, fp[].back_ctx)
 
 
@@ -92,21 +93,16 @@ def main() raises:
     var ok = True
     var reason = "ok"
 
-    var base = UnsafePointer[Byte, MutAnyOrigin](unsafe_from_address=1)
-    var top = UnsafePointer[Byte, MutAnyOrigin](unsafe_from_address=1)
-    if ms_stack_alloc(
-        STACK_BYTES,
-        UnsafePointer[UnsafePointer[Byte, MutAnyOrigin], MutAnyOrigin](to=base),
-        UnsafePointer[UnsafePointer[Byte, MutAnyOrigin], MutAnyOrigin](to=top),
-    ) != 0:
+    var slots = stack_allocation[2, BytePtr]()
+    if ms_stack_alloc(STACK_BYTES, slots, slots + 1) != 0:
         ok = False
         reason = "ms_stack_alloc failed"
 
     if ok:
-        var main_buf = InlineArray[Int, CTX_SLOTS](fill=0)
-        var alt_buf = InlineArray[Int, CTX_SLOTS](fill=0)
-        var main_ctx = byte_ptr(UnsafePointer[Int, MutAnyOrigin](to=main_buf[0]))
-        var alt_ctx = byte_ptr(UnsafePointer[Int, MutAnyOrigin](to=alt_buf[0]))
+        var main_buf = stack_allocation[MS_CTX_SIZE // 8, Int]()
+        var alt_buf = stack_allocation[MS_CTX_SIZE // 8, Int]()
+        var main_ctx = main_buf.bitcast[Byte]()
+        var alt_ctx = alt_buf.bitcast[Byte]()
 
         var cs = Counters()
         var frame = Frame()
@@ -115,33 +111,32 @@ def main() raises:
         frame.counters = UnsafePointer[Counters, MutAnyOrigin](to=cs)
         var frame_p = UnsafePointer[Frame, MutAnyOrigin](to=frame).bitcast[Byte]()
 
-        ms_ctx_make(alt_ctx, top, alt_entry, frame_p)
+        ms_ctx_make(alt_ctx, (slots + 1)[], entry_pointer["t4_alt_entry"](), frame_p)
         ms_ctx_switch(main_ctx, alt_ctx)  # enter; ALT yields once
 
         if cs.dtor != 0 or frame.yields_seen != 1:
             ok = False
             reason = "unexpected state at yield"
 
-        ms_ctx_switch(main_ctx, alt_ctx)  # resume; error raised after resume
+        if ok:
+            ms_ctx_switch(main_ctx, alt_ctx)  # resume; error raised after resume
 
-        if frame.error_message != "resume-failure-42":
-            ok = False
-            reason = (
-                "error did not propagate intact, got: '" + frame.error_message + "'"
-            )
-        if not frame.cleanup_ok:
-            ok = False
-            reason = (
-                "cleanup wrong after unwind: ctor="
-                + String(cs.ctor)
-                + " dtor="
-                + String(cs.dtor)
-            )
-        if frame.yields_seen != 1:
-            ok = False
-            reason = "unexpected extra yields"
+            if frame.error_message != "resume-failure-42":
+                ok = False
+                reason = "error did not propagate intact, got: '" + frame.error_message + "'"
+            if not frame.cleanup_ok:
+                ok = False
+                reason = (
+                    "cleanup wrong after unwind: ctor="
+                    + String(cs.ctor)
+                    + " dtor="
+                    + String(cs.dtor)
+                )
+            if frame.yields_seen != 1:
+                ok = False
+                reason = "unexpected extra yields"
 
-        ms_stack_free(base)
+        ms_stack_free(slots[])
 
     print("T4 raises-after-resume propagation: " + ("PASS" if ok else "FAIL (" + reason + ")"))
     if not ok:
