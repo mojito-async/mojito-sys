@@ -1,32 +1,45 @@
 #!/bin/sh
-# mojito-sys S1 — abi/test-suite entry point (issue #24/#25).
+# mojito-sys S1 — abi test-suite driver (issue #24/#25).
 #
-# Runs every S1 abi lane test runner below tests/s1/abi/. Each lane owns
-# its own runner and prints its own matrix; nonzero exits are propagated.
+# Runs every lane runner below tests/s1/abi/ (discovered, not hardcoded —
+# review PR #34, H3). Each lane owns its own runner and prints its own
+# matrix; nonzero exits are propagated.
+#
+# Contract lines consumed by the S1 umbrella driver (s1/build):
+#   print "RESULT: all green"  on success
+#   print "RESULT: <n> FAILED" on any failure
 
 set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-RUNNERS="types"
+# Discover lane runners: tests/s1/abi/*/run.sh (sorted, deterministic).
+RUNNERS=$(find "$SCRIPT_DIR" -mindepth 2 -maxdepth 2 -name run.sh | sort)
 
-failures=0
-for r in $RUNNERS; do
-    runner="$SCRIPT_DIR/$r/run.sh"
+if [ -z "$RUNNERS" ]; then
+    echo "ERROR: no lane runners found under $SCRIPT_DIR"
+    echo "RESULT: 1 FAILED"
+    exit 1
+fi
+
+lane_failures=0
+count=0
+for runner in $RUNNERS; do
+    count=$((count + 1))
     if [ ! -x "$runner" ]; then
-        echo "s1/abi/$r FAIL (runner missing)"
-        failures=$((failures + 1))
+        echo "s1/abi lane FAIL (runner not executable: $runner)"
+        lane_failures=$((lane_failures + 1))
         continue
     fi
     if ! "$runner"; then
-        failures=$((failures + 1))
+        lane_failures=$((lane_failures + 1))
     fi
     echo ""
 done
 
-if [ "$failures" -ne 0 ]; then
-    echo "S1 abi suite: $failures lane(s) FAILED"
+if [ "$lane_failures" -ne 0 ]; then
+    echo "RESULT: $lane_failures/$count FAILED"
     exit 1
 fi
-echo "S1 abi suite: all lanes green"
+echo "RESULT: all green"
 exit 0
