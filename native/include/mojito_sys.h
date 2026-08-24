@@ -45,6 +45,14 @@ extern "C" {
 /* Host page size (sysconf(_SC_PAGESIZE)); > 0. */
 int mjs_page_size(void);
 
+/* Standardized native callback shape (spec §8): a C-ABI function pointer
+ * plus an opaque userdata pointer, transported as one two-word token. */
+typedef void (*ms_callback)(void *userdata);
+typedef struct mjs_callback_token {
+    void *addr;      /* ms_callback code address; NULL = none */
+    void *userdata;  /* opaque, passed through unmodified */
+} mjs_callback_token;
+
 /* Allocation granularity for reservations; >= page size. */
 int mjs_granularity(void);
 
