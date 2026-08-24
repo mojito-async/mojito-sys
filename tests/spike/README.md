@@ -80,7 +80,7 @@ an asm/C helper linked statically into the same executable:
 | T8 | `t8_gpr_preservation.mojo` | `t8_gpr_probe.S` | x19–x28, fp(x29), lr(x30) preserved across `ms_ctx_switch`; sp 16-aligned at entry/resume |
 | T9 | `t9_simd_preservation.mojo` | `t9_simd_probe.S` | d8–d15 (low 64 bits of v8–v15) preserved bit-exactly |
 | T10 | `t10_stack_alignment.mojo` | `t10_align_probe.S` | sp 16-aligned at trampoline entry + post-switch resume; sp stable; Mojo frames 16-aligned pre/post switch |
-| T11 | `t11_tls_continuity.mojo` | `t11_tls_probe.S` | `pthread_self()` and TPIDRROEL0 (TLS base / `_pthread` TSD) identical before/during/after switches |
+| T11 | `t11_tls_continuity.mojo` | `t11_tls_probe.S` | functional pthread-TSD continuity: seeded TSD magic observed inside B and intact after switch-back; `pthread_self()` unchanged. Raw TPIDR_EL0 reads are captured informationally only (not stable equality targets on macOS arm64). |
 | T12 | `t12_synthetic_stack.mojo` | `t12_synth_probe.S` | fresh context enters/exits via completion path; heap + own-stack sentinels intact; equal-size free/realloc cycle clean |
 | T13 | `t13_guard_page.mojo` | `t13_guard_probe.c` | top-of-stack byte writable; deliberate write into the PROT_NONE guard page raises a controlled protection fault (SIGBUS on macOS arm64, SIGSEGV elsewhere) in a forked child |
 | T14 | `t14_runtime_audit.sh` | — | `nm -u`/`nm -gU` audit: no private Mojo/Modular runtime symbols referenced or exported by the spike dylib |
