@@ -21,10 +21,11 @@ SYS_BUILD := $(BUILD)/sys
 SYS_INC   := native/include
 DYLIB_SYS := libmojito_sys.dylib
 
-SYS_CSRCS := $(wildcard native/**/*.c)
-SYS_SSRCS := $(wildcard native/**/*.S)
+SYS_CSRCS := $(sort $(shell find native -name '*.c' -type f))
+SYS_SSRCS := $(sort $(shell find native -name '*.S' -type f))
 SYS_OBJS  := $(patsubst native/%.c,$(SYS_BUILD)/%.o,$(SYS_CSRCS)) \
              $(patsubst native/%.S,$(SYS_BUILD)/%.o,$(SYS_SSRCS))
+SYS_DEPS  := $(SYS_OBJS:.o=.d)
 
 # ---- S0 spike (existing) -----------------------------------------------------
 
@@ -55,7 +56,7 @@ $(BUILD)/%.o: $(SPIKE)/%.S | $(BUILD)
 
 $(SYS_BUILD)/%.o: native/%.c | $(SYS_BUILD)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -I$(SYS_INC) -c $< -o $@
+	$(CC) $(CFLAGS) -I$(SYS_INC) -MMD -MF $@.d -c $< -o $@
 
 $(SYS_BUILD)/%.o: native/%.S | $(SYS_BUILD)
 	@mkdir -p $(dir $@)
@@ -83,5 +84,6 @@ bench: $(DYLIB)
 test-s1: $(DYLIB_SYS)
 	MOJO=$(MOJO) ./tests/s1/run.sh
 
+-include $(SYS_DEPS)
 clean:
 	rm -rf $(BUILD) $(DYLIB) $(DYLIB_SYS)
