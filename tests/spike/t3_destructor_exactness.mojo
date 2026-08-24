@@ -5,12 +5,19 @@
 #   destroyed once
 #   not destroyed at yield
 #   not duplicated after resume
-#
-# Red-phase note: imports frozen mojito_spike names; fails until #8/#9/#10 land.
 
-from mojito_spike import ms_ctx_make, ms_ctx_switch, ms_stack_alloc, ms_stack_free
+from std.memory import stack_allocation
 
-comptime CTX_SLOTS = 22
+from mojito_spike import (
+    BytePtr,
+    MS_CTX_SIZE,
+    entry_pointer,
+    ms_ctx_make,
+    ms_ctx_switch,
+    ms_stack_alloc,
+    ms_stack_free,
+)
+
 comptime STACK_BYTES = 262144
 
 
@@ -35,23 +42,19 @@ struct Probe:
 
 
 struct Frame:
-    var self_ctx: UnsafePointer[Byte, MutAnyOrigin]
-    var back_ctx: UnsafePointer[Byte, MutAnyOrigin]
+    var self_ctx: BytePtr
+    var back_ctx: BytePtr
     var counters: UnsafePointer[Counters, MutAnyOrigin]
     # Sampled by MAIN while ALT is suspended (must show dtor == 0 at yield).
     var dtor_at_yield: Int
-    var finished: Bool
+    var invariant_broken: Bool
 
     def __init__(out self):
         self.self_ctx = UnsafePointer[Byte, MutAnyOrigin](unsafe_from_address=1)
         self.back_ctx = UnsafePointer[Byte, MutAnyOrigin](unsafe_from_address=1)
         self.counters = UnsafePointer[Counters, MutAnyOrigin](unsafe_from_address=1)
         self.dtor_at_yield = -1
-        self.finished = False
-
-
-def byte_ptr(p: UnsafePointer[Int, MutAnyOrigin]) -> UnsafePointer[Byte, MutAnyOrigin]:
-    return p.bitcast[Byte]()
+        self.invariant_broken = False
 
 
 def probe_phase(fp: UnsafePointer[Frame, MutAnyOrigin]):
@@ -60,6 +63,7 @@ def probe_phase(fp: UnsafePointer[Frame, MutAnyOrigin]):
 
     # Constructed exactly once; nothing destroyed yet.
     if cs[].ctor != 1 or cs[].dtor != 0:
+        fp[].invariant_broken = True
         return
 
     # Suspend with probe live. Main samples dtor_at_yield while we are out.
@@ -71,37 +75,28 @@ def probe_phase(fp: UnsafePointer[Frame, MutAnyOrigin]):
     # Scope exit of probe_phase destroys `probe` exactly once.
 
 
-def alt_entry(ud: UnsafePointer[Byte, MutAnyOrigin]):
+@export("t3_alt_entry")
+def alt_entry(ud: BytePtr) abi("C"):
     var fp = ud.bitcast[Frame]()
     probe_phase(fp)
-
-    if fp[].dtor_at_yield < 0:
-        # probe_phase bailed early on an invariant violation; surface it so
-        # main reports FAIL.
-        fp[].dtor_at_yield = -2
-
-    fp[].finished = True
+    # Hand control back one last time; main treats this as completion.
     ms_ctx_switch(fp[].self_ctx, fp[].back_ctx)
+
 
 def main() raises:
     var ok = True
     var reason = "ok"
 
-    var base = UnsafePointer[Byte, MutAnyOrigin](unsafe_from_address=1)
-    var top = UnsafePointer[Byte, MutAnyOrigin](unsafe_from_address=1)
-    if ms_stack_alloc(
-        STACK_BYTES,
-        UnsafePointer[UnsafePointer[Byte, MutAnyOrigin], MutAnyOrigin](to=base),
-        UnsafePointer[UnsafePointer[Byte, MutAnyOrigin], MutAnyOrigin](to=top),
-    ) != 0:
+    var slots = stack_allocation[2, BytePtr]()
+    if ms_stack_alloc(STACK_BYTES, slots, slots + 1) != 0:
         ok = False
         reason = "ms_stack_alloc failed"
 
     if ok:
-        var main_buf = InlineArray[Int, CTX_SLOTS](fill=0)
-        var alt_buf = InlineArray[Int, CTX_SLOTS](fill=0)
-        var main_ctx = byte_ptr(UnsafePointer[Int, MutAnyOrigin](to=main_buf[0]))
-        var alt_ctx = byte_ptr(UnsafePointer[Int, MutAnyOrigin](to=alt_buf[0]))
+        var main_buf = stack_allocation[MS_CTX_SIZE // 8, Int]()
+        var alt_buf = stack_allocation[MS_CTX_SIZE // 8, Int]()
+        var main_ctx = main_buf.bitcast[Byte]()
+        var alt_ctx = alt_buf.bitcast[Byte]()
 
         var cs = Counters()
         var frame = Frame()
@@ -110,11 +105,11 @@ def main() raises:
         frame.counters = UnsafePointer[Counters, MutAnyOrigin](to=cs)
         var frame_p = UnsafePointer[Frame, MutAnyOrigin](to=frame).bitcast[Byte]()
 
-        ms_ctx_make(alt_ctx, top, alt_entry, frame_p)
+        ms_ctx_make(alt_ctx, (slots + 1)[], entry_pointer["t3_alt_entry"](), frame_p)
         ms_ctx_switch(main_ctx, alt_ctx)
 
-        # We are back while `probe` is still alive on the synthetic stack.
-        if cs.ctor != 1 or cs.dtor != 0:
+        # We are back while `probe` is still live on the synthetic stack.
+        if cs.ctor != 1 or cs.dtor != 0 or frame.invariant_broken:
             ok = False
             reason = (
                 "at yield expected ctor=1/dtor=0, got ctor="
@@ -123,24 +118,26 @@ def main() raises:
                 + String(cs.dtor)
             )
 
-        while not frame.finished:
-            ms_ctx_switch(main_ctx, alt_ctx)
+        if ok:
+            ms_ctx_switch(main_ctx, alt_ctx)  # resume; probe scope then exits
 
-        if frame.dtor_at_yield != 0:
-            ok = False
-            reason = "destructor ran during suspension (dtor_at_yield=" + String(
-                frame.dtor_at_yield
-            ) + ")"
-        if cs.ctor != 1 or cs.dtor != 1:
-            ok = False
-            reason = (
-                "final expected ctor=1/dtor=1, got ctor="
-                + String(cs.ctor)
-                + "/dtor="
-                + String(cs.dtor)
-            )
+            if frame.dtor_at_yield != 0:
+                ok = False
+                reason = (
+                    "destructor ran during suspension (dtor_at_yield="
+                    + String(frame.dtor_at_yield)
+                    + ")"
+                )
+            if cs.ctor != 1 or cs.dtor != 1:
+                ok = False
+                reason = (
+                    "final expected ctor=1/dtor=1, got ctor="
+                    + String(cs.ctor)
+                    + "/dtor="
+                    + String(cs.dtor)
+                )
 
-        ms_stack_free(base)
+        ms_stack_free(slots[])
 
     print("T3 destructor exactness: " + ("PASS" if ok else "FAIL (" + reason + ")"))
     if not ok:

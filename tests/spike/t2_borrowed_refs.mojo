@@ -7,12 +7,19 @@
 #   * the alternate context borrows pointers to MAIN-stack objects and uses
 #     them before and after being resumed;
 #   * main re-verifies its own stack-backed objects after every switch back.
-#
-# Red-phase note: imports frozen mojito_spike names; fails until #8/#9/#10 land.
 
-from mojito_spike import ms_ctx_make, ms_ctx_switch, ms_stack_alloc, ms_stack_free
+from std.memory import stack_allocation
 
-comptime CTX_SLOTS = 22
+from mojito_spike import (
+    BytePtr,
+    MS_CTX_SIZE,
+    entry_pointer,
+    ms_ctx_make,
+    ms_ctx_switch,
+    ms_stack_alloc,
+    ms_stack_free,
+)
+
 comptime STACK_BYTES = 262144
 comptime PATTERN_LEN = 16
 
@@ -27,15 +34,14 @@ struct Payload:
 
 
 struct Frame:
-    var self_ctx: UnsafePointer[Byte, MutAnyOrigin]
-    var back_ctx: UnsafePointer[Byte, MutAnyOrigin]
+    var self_ctx: BytePtr
+    var back_ctx: BytePtr
     # Borrows into MAIN's stack frame:
     var borrowed_payload: UnsafePointer[Payload, MutAnyOrigin]
     var borrowed_array: UnsafePointer[Int, MutAnyOrigin]
-    # Borrows into ALT's stack frame (main writes it before entering):
+    # Borrows into ALT's stack frame (main observes the writeback):
     var alt_scratch: UnsafePointer[Int, MutAnyOrigin]
     var corrupt: Bool
-    var finished: Bool
 
     def __init__(out self):
         self.self_ctx = UnsafePointer[Byte, MutAnyOrigin](unsafe_from_address=1)
@@ -46,7 +52,6 @@ struct Frame:
         self.borrowed_array = UnsafePointer[Int, MutAnyOrigin](unsafe_from_address=1)
         self.alt_scratch = UnsafePointer[Int, MutAnyOrigin](unsafe_from_address=1)
         self.corrupt = False
-        self.finished = False
 
 
 def array_ok(p: UnsafePointer[Int, MutAnyOrigin]) -> Bool:
@@ -58,11 +63,8 @@ def array_ok(p: UnsafePointer[Int, MutAnyOrigin]) -> Bool:
     return True
 
 
-def byte_ptr(p: UnsafePointer[Int, MutAnyOrigin]) -> UnsafePointer[Byte, MutAnyOrigin]:
-    return p.bitcast[Byte]()
-
-
-def alt_entry(ud: UnsafePointer[Byte, MutAnyOrigin]):
+@export("t2_alt_entry")
+def alt_entry(ud: BytePtr) abi("C"):
     var fp = ud.bitcast[Frame]()
 
     # Write through the borrow into MAIN's stack before suspending.
@@ -83,29 +85,21 @@ def alt_entry(ud: UnsafePointer[Byte, MutAnyOrigin]):
     if local_p[].tag != 7 or local_p[].value != 700:
         fp[].corrupt = True
 
-    fp[].finished = True
-    ms_ctx_switch(fp[].self_ctx, fp[].back_ctx)
-
 
 def main() raises:
     var ok = True
     var reason = "ok"
 
-    var base = UnsafePointer[Byte, MutAnyOrigin](unsafe_from_address=1)
-    var top = UnsafePointer[Byte, MutAnyOrigin](unsafe_from_address=1)
-    if ms_stack_alloc(
-        STACK_BYTES,
-        UnsafePointer[UnsafePointer[Byte, MutAnyOrigin], MutAnyOrigin](to=base),
-        UnsafePointer[UnsafePointer[Byte, MutAnyOrigin], MutAnyOrigin](to=top),
-    ) != 0:
+    var slots = stack_allocation[2, BytePtr]()
+    if ms_stack_alloc(STACK_BYTES, slots, slots + 1) != 0:
         ok = False
         reason = "ms_stack_alloc failed"
 
     if ok:
-        var main_buf = InlineArray[Int, CTX_SLOTS](fill=0)
-        var alt_buf = InlineArray[Int, CTX_SLOTS](fill=0)
-        var main_ctx = byte_ptr(UnsafePointer[Int, MutAnyOrigin](to=main_buf[0]))
-        var alt_ctx = byte_ptr(UnsafePointer[Int, MutAnyOrigin](to=alt_buf[0]))
+        var main_buf = stack_allocation[MS_CTX_SIZE // 8, Int]()
+        var alt_buf = stack_allocation[MS_CTX_SIZE // 8, Int]()
+        var main_ctx = main_buf.bitcast[Byte]()
+        var alt_ctx = alt_buf.bitcast[Byte]()
 
         # Stack-backed Mojo values on MAIN's stack, referenced across the switch.
         var payload = Payload(3, 33)
@@ -124,7 +118,7 @@ def main() raises:
         frame.alt_scratch = UnsafePointer[Int, MutAnyOrigin](to=alt_scratch)
         var frame_p = UnsafePointer[Frame, MutAnyOrigin](to=frame).bitcast[Byte]()
 
-        ms_ctx_make(alt_ctx, top, alt_entry, frame_p)
+        ms_ctx_make(alt_ctx, (slots + 1)[], entry_pointer["t2_alt_entry"](), frame_p)
         ms_ctx_switch(main_ctx, alt_ctx)
 
         # After resume: ALT's write through its borrow must have landed here.
@@ -135,8 +129,7 @@ def main() raises:
             ok = False
             reason = "main could not observe alt-stack writeback"
 
-        while not frame.finished:
-            ms_ctx_switch(main_ctx, alt_ctx)
+        ms_ctx_switch(main_ctx, alt_ctx)  # final resume; callback then returns
 
         if frame.corrupt:
             ok = False
@@ -145,7 +138,7 @@ def main() raises:
             ok = False
             reason = "pattern array corrupted after full round trip"
 
-        ms_stack_free(base)
+        ms_stack_free(slots[])
 
     print("T2 borrowed-reference validity: " + ("PASS" if ok else "FAIL (" + reason + ")"))
     if not ok:
