@@ -5,47 +5,60 @@
 #     typedef void (*ms_callback)(void *userdata);
 #
 # Mojo 1.0.0b2 cannot express a raw C function pointer as a comptime alias /
-# struct field: function types here are nominal, and every UnsafePointer-based
+# struct field: function types here are nominal and every UnsafePointer-based
 # fn-pointer conversion is rejected (see S0 SPIKE_REPORT). This lane therefore
 # fixes ONLY the token half of the shape — the opaque descriptor a caller
-# stores and passes to native code. The callback itself stays a Mojo
+# stores and passes to native code. The callback itself stays a
 # `def ... abi("C")` (lowered to the C ABI) addressed by its machine pointer;
 # those are the spike-lane's concern.
 #
-# The token is a plain pair of machine-word address slots (POD). It is NOT
-# a function pointer and MUST NOT be invoked from Mojo; it exists to be
-# carried across the C ABI firewall and resolved by native trampoline code.
+# The token is a POD pair of machine-word address slots. It is NOT a function
+# pointer and MUST NOT be invoked from Mojo; it exists to be carried across
+# the C ABI firewall and resolved by native trampoline code.
 #
-# S1 LIFETIME RULES (spec §8) — binding authors MUST respect these:
+# LIFETIME + OWNERSHIP RULES (mirrors spec §8):
 #   * native code MUST NOT retain temporary Mojo pointers without an explicit
-#     lifetime contract (stack addresses are volatile across transfers);
-#   * stack-borrowing callbacks MUST remain synchronous unless their lifetime
-#     is statically guaranteed — never queue a callback that borrows Mojo
-#     stack locals for a later thread;
+#     lifetime contract;
 #   * cross-thread callbacks entering Mojo MUST follow any runtime
 #     initialization/attachment requirements documented by Mojo;
-#   * callback ownership and destruction MUST be explicit — a token that
-#     outlives its registration is a dangling descriptor.
+#   * callback ownership and destruction MUST be explicit;
+#   * stack-borrowing callbacks MUST remain synchronous unless lifetime is
+#     statically guaranteed.
+#   When native code holds a token (or the userdata it registers), the
+#   descriptor and any borrowed Mojo pointer remain valid for at least the
+#   registration's lifetime; a token that outlives its registration is a
+#   dangling descriptor.
+#
+# NULLABILITY (b2): `UnsafePointer` is a NON-NULLABLE type — a literal
+# `unsafe_from_address=0` is a compile error ("UnsafePointer is non-nullable").
+# The supported construction paths supply the address as a comptime const or
+# a runtime value, both of which admit zero (verified in this lane). We do NOT
+# model the slot with an `Optional[UnsafePointer]`: Optional is a tagged
+# wrapper whose layout is not a bare machine word, so it would break the C
+# `void*` field shape of the token. `unset()` centralizes legal null
+# construction.
 
 from std.memory import UnsafePointer
 
 # C `void*` has no `Void` type in Mojo; the pointee type is a formality for
-# the address slot. `NoneType` is the stdlib convention for an arbitrary /
-# untracked C pointer target.
+# the address slot. `NoneType` is the stdlib convention for an untracked C
+# pointer target.
+comptime BytePtr = UnsafePointer[Byte, MutAnyOrigin]
+
+# Address slot of the callback's code (function) pointer.
 comptime VoidPtr = UnsafePointer[NoneType, MutAnyOrigin]
 
-# Opaque userdata carrier passed to native code. `NoneType` pointee because
-# the slot is an address, never dereferenced through this type. The token is
-# a descriptor only; native code interprets the raw address per its own ABI.
+# Opaque userdata carrier passed to native code. `NoneType` pointee: the slot
+# is an address, never dereferenced through this type; native code interprets
+# the raw address per its own ABI. `MutUntrackedOrigin` signals a raw foreign
+# address Mojo does not track or dereference.
 comptime UserdataPtr = UnsafePointer[NoneType, MutUntrackedOrigin]
 
 
 struct CallbackToken:
-    # Resolved machine address of the target callback (0 = none yet).
+    # Resolved machine address of the target callback (0 = null token).
     var addr: VoidPtr
-    # Opaque userdata delivered back to the callback. `MutAnyOrigin` would
-    # also be defensible; `MutUntrackedOrigin` signals this slot holds a raw
-    # foreign address Mojo does not track or dereference.
+    # Opaque userdata delivered back to the callback (0 allowed).
     var userdata: UserdataPtr
 
     def __init__(
@@ -56,12 +69,31 @@ struct CallbackToken:
         self.addr = addr
         self.userdata = userdata
 
-    # A token is null when its function address is zero (C null pointer).
+    # Null token (no callback). Centralizes the b2-legal null construction:
+    # a comptime/runtime-sourced zero address.
+    @staticmethod
+    def unset() -> CallbackToken:
+        var zero = 0
+        return CallbackToken(
+            VoidPtr(unsafe_from_address=zero),
+            UserdataPtr(unsafe_from_address=zero),
+        )
+
+    # Token for a callback whose code pointer originates from a `BytePtr`
+    # (e.g. the spike's `entry_pointer`). The slot is re-typed to `VoidPtr`
+    # without a dereference — a pure address projection; b2's nominal pointer
+    # types reject unsafe casts, and bitcast preserves the numeric address
+    # exactly (conformance asserts this).
+    @staticmethod
+    def from_code_pointer(addr: BytePtr, userdata: UserdataPtr) -> CallbackToken:
+        return CallbackToken(addr.bitcast[NoneType](), userdata)
+
+    # Nullity is callback-address nullity: a token is null iff its callback
+    # function address is zero. A userdata slot on a null address is retained
+    # but explicitly ignored by native code that checks the address first.
     def is_null(self) -> Bool:
         return Int(self.addr) == 0
 
-    # Numeric address of the userdata slot — the round-trip value native code
-    # receives back. Exposed so tokens can be inspected/asserted without a
-    # dereference (the pointee of `userdata` is intentionally opaque here).
-    def userdata_addr(self) -> Int:
-        return Int(self.userdata)
+    # NOTE: a token passed to live native code holds both slots by raw
+    # address. Do NOT reassign `addr`/`userdata` while the token is registered
+    # with code that captures it; mutate only an unregistered/scratch token.
