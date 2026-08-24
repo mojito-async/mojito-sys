@@ -76,8 +76,8 @@ def lookup[codes: List[Int32], names: List[String]](code: Int32) -> String:
 #   POSIX    — POSIX errno codes from the C `errno` namespace (0 = no
 #              error). Carries the raw positive errno; use `SysError.ok()`
 #              for the success case.
-#   MACH     — mach_object_status / kern_return codes from the macOS Mach
-#              kernel (0 = success, nonzero = failure code).
+#   MACH     — kern_return / mach_error codes from the macOS Mach kernel
+#              (0 = success, nonzero = failure code).
 #   INTERNAL — mojito-sys internal status codes (arbitrary nonzero failure
 #              codes, 0 = success). For invariants and "cannot happen"
 #              failures rather than OS surfaces.
