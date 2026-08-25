@@ -18,7 +18,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
 CC=${CC:-cc}
 OUT="$SCRIPT_DIR/.build"
-DYLIB="libmojito_sys.dylib"
+DYLIB="$REPO_ROOT/libmojito_sys.dylib"
 if ! make -C "$REPO_ROOT" libmojito_sys.dylib >/dev/null 2>&1; then
     echo "ERROR: cannot build $DYLIB; run \`make\` at the repo root."
     exit 2
@@ -35,7 +35,7 @@ for src in "$SCRIPT_DIR"/*_smoke.c; do
             "$src" "$DYLIB" -o "$bin" >"$OUT/$name.build.log" 2>&1; then
         printf '%s FAIL\n' "$name"
         tail -n 8 "$OUT/$name.build.log" | sed 's/^/    | /'
-        matrix="$name FAIL
+        matrix="$matrix$name FAIL
 "
         failures=$((failures + 1))
         continue

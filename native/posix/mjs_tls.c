@@ -20,6 +20,17 @@
  * underlying pthread call) to close the get/set-vs-destroy race where a
  * deleted pthread key would be dereferenced; critical sections are tiny
  * linear scans and TLS ops are not hot-loop paths in S2.
+ *
+ * Design note — scalability ceiling & revisit trigger: this single static
+ * mutex serializes all keys × all threads, INCLUDING reads (get holds it
+ * for validation). Spec §12 names current_worker/current_task/
+ * current_scope as first consumers, and their per-task-transition hot
+ * reads would turn that lock into a global contention point. This is
+ * correct and race-safe today, but the #51 Mojo wrapper MUST NOT be gated
+ * on this layer until reads go sharded / epoch-tagged lock-free: the
+ * monotonic public ids already carry generation bits, so a stale handle
+ * can be detected without the lock. Revisit when a hot-path consumer
+ * lands or get() shows up in profiles under contention.
  */
 #include <errno.h>
 #include <pthread.h>
