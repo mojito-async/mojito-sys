@@ -20,3 +20,5 @@ tests/s1/*/.build/
 tests/s1/*/*/.build/
 tests/s2/*/.build/
 tests/s2/*/*/.build/
+tests/s4/time/.build/
+tests/s4/time/monotonic/.build/
