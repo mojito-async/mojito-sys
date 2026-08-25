@@ -232,7 +232,9 @@ int mjs_cpu_physical(int *out);
  * bit i of word w selects logical CPU w*64 + i. mask == NULL or
  * nwords == 0 is -EINVAL. Linux: sched_setaffinity on the calling thread.
  * Darwin: thread_policy_set best-effort; hosts without thread-affinity
- * support return exactly -ENOTSUP. */
+ * support return exactly -ENOTSUP. Where the call SUCCEEDS, the mask
+ * contents are ignored: the policy is a coarse prefer-current-core hint,
+ * not an exact pin — 0 does not promise the exact set was applied. */
 int mjs_cpu_affinity_set_current(const uint64_t *mask, unsigned nwords);
 
 #ifdef __cplusplus

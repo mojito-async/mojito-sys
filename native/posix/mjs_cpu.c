@@ -19,6 +19,11 @@
  * Deliberately no get-API (SYS-1): spec §13 asks set-only; verification in
  * tests goes through the kernel's own sched_getaffinity on Linux.
  */
+#ifdef __linux__
+#define _GNU_SOURCE /* CPU_ALLOC / CPU_SET_S / sched_[gs]etaffinity */
+#endif /* must precede every libc include: feature macros latch on
+        * first processing of features.h */
+
 #include <errno.h>
 
 #include "mojito_sys.h"
@@ -33,7 +38,6 @@
 #endif
 
 #ifdef __linux__
-#define _GNU_SOURCE /* CPU_ALLOC / CPU_SET_S */
 #include <dirent.h>
 #include <sched.h>
 #include <stdio.h>
@@ -55,6 +59,8 @@ int mjs_cpu_logical(void) {
  * positive answer is reported as -ENOTSUP (advisory topology), leaving
  * *out untouched per the frozen out-param contract. */
 int mjs_cpu_physical(int *out) {
+    if (out == NULL)
+        return -ENOTSUP; /* house convention: validate out-params */
     int phys = 0;
     size_t len = sizeof(phys);
     if (sysctlbyname("hw.physicalcpu", &phys, &len, NULL, 0) != 0 ||
@@ -65,7 +71,7 @@ int mjs_cpu_physical(int *out) {
 }
 #elif defined(__linux__)
 /* Best-effort heuristic: count unique (physical_package_id, core_id) pairs
- * across /sys/devices/system/cpu/cpu*/topology. Any host that does not
+ * across /sys/devices/system/cpu/cpuN/topology. Any host that does not
  * expose the topology files yields -ENOTSUP rather than a guess. */
 static int read_sysfs_long(const char *path, long *out) {
     FILE *f = fopen(path, "r");
@@ -81,6 +87,8 @@ static int read_sysfs_long(const char *path, long *out) {
 }
 
 int mjs_cpu_physical(int *out) {
+    if (out == NULL)
+        return -ENOTSUP; /* house convention: validate out-params */
     DIR *d = opendir("/sys/devices/system/cpu");
     if (!d)
         return -ENOTSUP;
