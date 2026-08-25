@@ -28,3 +28,5 @@ mjs_tls_destroy
 mjs_cpu_logical
 mjs_cpu_physical
 mjs_cpu_affinity_set_current
+mjs_clock_now
+mjs_clock_resolution
