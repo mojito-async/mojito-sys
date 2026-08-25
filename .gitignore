@@ -17,3 +17,4 @@ spike/context_switch/*.log
 __pycache__/
 .DS_Store
 tests/s1/*/.build/
+tests/s1/*/*/.build/

@@ -59,19 +59,26 @@ static size_t round_up(size_t n, size_t a) {
 static int fail(int e) {
     return -e;
 }
-
 int mjs_vm_reserve(size_t bytes, void **out_base, size_t *out_reserved) {
     if (out_base == NULL || out_reserved == NULL) {
         return fail(EINVAL);
     }
 
     size_t ps = page_size();
-    /* Rounding to page may add one page; reject a request that would wrap. */
-    if (bytes > (size_t)-1 - ps) {
+    /* Frozen ABI (issue #24): reservations round up to the ALLOCATION
+     * GRANULARITY, not the page size. On POSIX they coincide, but a distinct
+     * Windows granularity must not calcify into an off-by-granule bug here.
+     * mjs_granularity() is defined in native/posix/mjs_page.c (issue #28);
+     * fall back to the page size if it reports a bogus value. */
+    int g = mjs_granularity();
+    size_t gran = (g > 0 && (size_t)g >= ps) ? (size_t)g : ps;
+
+    /* Rounding to granularity may add one granule; reject wrap-around. */
+    if (bytes > (size_t)-1 - gran) {
         return fail(EINVAL);
     }
 
-    size_t total = round_up(bytes == 0 ? ps : bytes, ps); /* >= 1 page */
+    size_t total = round_up(bytes == 0 ? gran : bytes, gran); /* >= 1 granule */
 
     void *base = mmap(NULL, total, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (base == MAP_FAILED)
