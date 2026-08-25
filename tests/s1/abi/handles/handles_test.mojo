@@ -14,16 +14,18 @@
 # re-probing liveness (a stale second close would kill the reissued slot).
 # Do not parallelize these checks.
 #
-# T2 reframe: a move is a transfer, so the receiver closes exactly once and
-# the moved-from source's destructor is suppressed by the compiler (the
-# ownership contract, guaranteed structurally — not by counting).  The
-# slot-reuse probe runs only AFTER both wrapper frames have unwound (see
-# move_and_dispose) so the single close is what the fresh allocation sees.
+# T2 reframe: a move is a transfer, and the probe OBSERVES the moved-from
+# source's destructor suppression rather than assuming it.  The helper
+# reissues raw's fd slot WHILE the moved-from source is still in scope; if
+# the compiler failed to suppress src's destructor at frame unwind, its
+# second close would kill that reissued slot and the caller's liveness
+# probe fails.
 
 from mojito_sys.abi.handles import (
     BorrowedFd,
     OpaqueNativeHandle,
     OwnedFd,
+    ms_close,  # close(2) binding reused for failure injection.
 )
 
 comptime F_DUPFD: Int32 = 0
@@ -52,30 +54,36 @@ def t1_null_handle() -> Bool:
     var h = OpaqueNativeHandle()
     return h.is_null()
 
-
 # ----------------------------------------------------------------------------
-# T2 — move keeps the value and closes exactly once.  The move + receiver
-# dispose run inside a helper; by the time it returns both the moved-from
-# source and the receiver are out of scope (destructors have run), so the
-# reissued slot proves the receiver's single close left the fresh allocation
-# alive.
+# T2 — move keeps the value and closes exactly once, with destructor timing
+# OBSERVED.  move_and_dispose closes raw and reissues its slot (fresh low-fd
+# allocation) while the moved-from source is still alive in that frame; only
+# after both wrappers unwind does the caller probe.  If the source
+# destructor were not suppressed it would close again during unwind —
+# killing the reissued slot — so a live probe proves suppression happened.
+# Returns the reissued descriptor, or -1 on any internal failure.
 # ----------------------------------------------------------------------------
-def move_and_dispose(raw: Int32) -> Bool:
+def move_and_dispose(raw: Int32) -> Int32:
     var src = OwnedFd(raw)
     var dst = src^  # move: src is moved-from, dst owns `raw`.
     if dst.get() != raw:
-        return False
-    var rc = dst.dispose()  # receiver closes exactly once
-    return (rc == 0) and dst.is_disposed()
+        return -1  # value not retained across the move.
+    if dst.dispose() != 0:  # receiver closes exactly once.
+        return -1
+    return fresh_fd()  # reissues raw's number before src's frame unwinds.
 
 
 def t2_move_keeps_value() -> Bool:
     var raw = fresh_fd()
-    var disposed_cleanly = move_and_dispose(raw)
-    # Both wrapper frames have unwound. A fresh low-fd allocation reuses
-    # `raw`'s number and must still be live (only one close happened).
-    var probe = fresh_fd()
-    return disposed_cleanly and is_open(probe) and (probe == raw)
+    var probe = move_and_dispose(raw)
+    # Both wrapper frames have unwound. The probe reused raw's number while
+    # src was still in scope; it must still be live (the moved-from source's
+    # destructor did NOT fire a second close during unwind).
+    var ok = (probe == raw) and is_open(probe)
+    if ok:
+        var owner = OwnedFd(probe)
+        ok = owner.dispose() == 0
+    return ok
 
 
 # ----------------------------------------------------------------------------
@@ -136,6 +144,26 @@ def t5_borrow_and_detach() -> Bool:
     return ok and (rc == 0) and (fd_out == raw)
 
 
+# ----------------------------------------------------------------------------
+# T6 — H1: dispose() surfaces the close(2) status.  When the underlying
+# close fails (descriptor already closed behind the wrapper's back -> EBADF,
+# rc == -1), the monotone flag stays CLEAR and the held fd is UNCHANGED so
+# the caller may retry; only rc == 0 commits _disposed/NO_FD.  The fd is
+# then detached to make the wrapper inert without a second failing close.
+# ----------------------------------------------------------------------------
+def t6_dispose_surfaces_error() -> Bool:
+    var raw = fresh_fd()
+    var own = OwnedFd(raw)
+    # Inject the failure: close raw out from under the owner.
+    if ms_close(raw) != 0:
+        return False
+    var rc = own.dispose()  # must surface -1, not swallow it.
+    var flag_clear = not own.is_disposed()  # failed close must NOT commit.
+    var fd_kept = own.get() == raw  # retryable: fd unchanged.
+    var inert = own.detach() == raw  # surrender without another close.
+    return (rc == -1) and flag_clear and fd_kept and inert
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -146,9 +174,10 @@ def main() raises:
         "t3_dispose_idempotent",
         "t4_borrowed_never_closes",
         "t5_borrow_and_detach",
+        "t6_dispose_surfaces_error",
     ]
     var failures = 0
-    for i in range(5):
+    for i in range(6):
         var ok = call_test(i + 1)
         print(names[i] + ": " + ("PASS" if ok else "FAIL"))
         if not ok:
@@ -169,4 +198,6 @@ def call_test(i: Int) -> Bool:
         return t4_borrowed_never_closes()
     elif i == 5:
         return t5_borrow_and_detach()
+    elif i == 6:
+        return t6_dispose_surfaces_error()
     return False
