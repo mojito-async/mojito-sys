@@ -16,3 +16,8 @@ mjs_vm_protect
 mjs_vm_release
 mjs_stack_alloc
 mjs_stack_free
+mjs_thread_spawn
+mjs_thread_join
+mjs_thread_detach
+mjs_thread_self_id
+mjs_thread_set_name
