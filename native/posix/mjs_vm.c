@@ -6,11 +6,14 @@
  *
  * Host: macOS arm64 (page 16384). The primitives are thin, allocation-free
  * wrappers over the common POSIX surface, so they are intentionally STATELESS
- * with respect to ownership: they operate on any mmap'd region the caller
- * already holds — a range reserved by mjs_vm_reserve, an mjs_stack_alloc
- * region, or an unrelated host mapping — and never require that the address
- * came from this module. This is what lets the stack lane's NativeStack.grow
- * commit mprotect-backed PROT_NONE gaps in place.
+ * with respect to ownership: they operate on any PRIVATE ANONYMOUS mapping
+ * the caller already holds — a range reserved by mjs_vm_reserve, an
+ * mjs_stack_alloc region, or an unrelated private anonymous host mapping —
+ * and never require that the address came from this module. Ranges backed by
+ * files or shared memory must NOT be passed here: decommit re-seals pages
+ * with MAP_FIXED anonymous mappings, which would silently replace file-
+ * backed pages with zeros-on-read anonymous ones. This statelessness is what
+ * lets the stack lane's NativeStack.grow seal PROT_NONE gaps in place.
  *
  *   reserve:  mmap PROT_NONE MAP_PRIVATE|MAP_ANON — reserves virtual address
  *             space with no committed physical backing and no accessibility
@@ -18,10 +21,14 @@
  *             is performed.
  *   commit:   mprotect the range to PROT_READ|PROT_WRITE (makes pages
  *             accessible without moving them); advances *addr past the range.
- *   decommit: mprotect the range to PROT_NONE (inaccessible until
- *             re-committed; addresses preserved; physical backing released
- *             lazily via madvise(MADV_FREE) where the platform supports it);
- *             advances *addr past the range.
+ *   decommit: atomically fail-closed RE-SEAL: mprotect the range to
+ *             PROT_NONE, then replace it with a fresh private anonymous
+ *             PROT_NONE mapping (MAP_FIXED|MAP_PRIVATE|MAP_ANON). The kernel
+ *             drops all previous physical backing, so re-commit exposes
+ *             ZEROES through every restoration path (commit or protect-to-
+ *             RW); addresses are preserved; no lazy madvise is involved.
+ *             On failure the range is left sealed PROT_NONE and *addr is
+ *             untouched; advances *addr past the range on success.
  *   protect:  mprotect the range to the requested flags (PROT_* from
  *             <sys/mman.h>). Addresses are preserved.
  *   release:  returns the whole reservation to the OS; NULLs *base.
@@ -98,12 +105,19 @@ int mjs_vm_decommit(unsigned char **addr, size_t length) {
     if (length == 0) {
         return 0;
     }
-    /* Set the range inaccessible first; then, best-effort, invite the VM to
-     * drop physical backing. The madvise hint must not fail the operation. */
+    /* Fail-closed re-seal (panel option D): seal PROT_NONE first, then swap
+     * the range for a fresh private anonymous PROT_NONE mapping via
+     * MAP_FIXED. The kernel discards all previous physical backing, so a
+     * re-commit observes ZEROES through every restoration path — no lazy
+     * madvise that could resurrect stale bytes. If the mmap fails the range
+     * stays sealed inaccessible and the cursor is left untouched. */
     if (mprotect(*addr, length, PROT_NONE) != 0) {
         return fail(errno);
     }
-    (void)madvise(*addr, length, MADV_FREE);
+    if (mmap(*addr, length, PROT_NONE,
+             MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0) == MAP_FAILED) {
+        return fail(errno); /* range sealed; cursor untouched */
+    }
     *addr += length;
     return 0;
 }

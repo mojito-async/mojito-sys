@@ -83,6 +83,18 @@ def main() raises:
     if not ok:
         failures += 1
     vm.commit(ps, ps)
+    # VM6c — frozen-header zero-fill promise (panel H1): after decommit the
+    # physical backing must be GONE, so re-committing exposes zeros. Assert
+    # every byte reads 0x00 BEFORE any write to the restored range.
+    mem_failures = 0
+    for i in range(ps, 2 * ps):
+        if p0[i] != UInt8(0):
+            mem_failures += 1
+            if mem_failures > 4:
+                break
+    ok = check("VM6c re-commit exposes zero-filled bytes", mem_failures == 0)
+    if not ok:
+        failures += 1
     p0[ps + 7] = UInt8(0x77)
     ok = check("VM6b re-commit writable", p0[ps + 7] == UInt8(0x77))
     if not ok:
@@ -117,6 +129,6 @@ def main() raises:
     if not ok:
         failures += 1
 
-    print("RESULT: " + String(14 - failures) + "/14 PASSED")
+    print("RESULT: " + String(15 - failures) + "/15 PASSED")
     if failures != 0:
         raise Error("VirtualMemory conformance FAILED (issue #29)")
