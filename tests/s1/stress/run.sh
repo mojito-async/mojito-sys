@@ -1,19 +1,30 @@
 #!/bin/sh
 # mojito-sys S1 stress lane — guarded-stack memory + stress tests (issue #31).
 #
-# Compiles the stress guard probe (t_guard_stress.c) once into .build/, then
-# AOT-builds each Mojo driver against it (-Xlinker) with the repo root on the
-# Mojo search path (-I), and runs them with the mojito-sys dylib findable via
-# DYLD_LIBRARY_PATH. Prints a PASS/FAIL matrix; exits nonzero if any driver
-# fails; prints "RESULT: all green" when clean.
+# Exit-code contract:
+#   0  all drivers passed ("RESULT: all green")
+#   1  one or more drivers failed (build or run)
+#   2  RUN-ERROR: toolchain missing or libmojito_sys not built — run
+#      `make test-s1` at the repo root first (sibling-lane convention).
 #
-# Until the build/vm/arrays native lanes merge, the mjs_* symbols these
-# drivers drive are NOT resolvable, so every driver FAILS at build with a red
-# unresolved-symbol verdict. That is the intended TDD red of issue #31, not a
-# harness bug; the drivers need no change to go green once deps land and this
-# branch is rebased. The C probe only provides the fork-based guard fault a
-# Mojo driver cannot express safely; all mjs calls are made directly from Mojo
-# via @extern abi("C").
+# Compiles the guard probes (t_guard_stress.c) once into .build/, then
+# AOT-builds each Mojo driver against the packaged libmojito_sys (-Xlinker,
+# -I repo root for mojito_sys, -I this dir for the shared externs module)
+# and runs them with the dylib findable via DYLD_LIBRARY_PATH (macOS) /
+# LD_LIBRARY_PATH (elsewhere). Prints a PASS/FAIL matrix; each driver prints
+# a grep-able "RESULT: <name> green" marker on success.
+#
+# TDD red: while the vm/stack native lanes (#29/#30) are unmerged, the
+# packaged dylib lacks mjs_stack_alloc / mjs_vm_commit / mjs_stack_free, so
+# every driver FAILS at link with an unresolved-symbol verdict. That is the
+# intended red of issue #31 — the drivers need no change to go green once
+# those lanes land and merge AFTER them (see PR body ordering note).
+# The C probe only provides fork-based deliberate faults a Mojo driver
+# cannot express safely; all mjs calls are made from Mojo via @extern abi("C")
+# through tests/s1/stress/stress_externs.mojo.
+#
+# Portability: no -arch flag; library suffix and runtime search-path env are
+# derived from uname -s (review M4).
 
 set -u
 
@@ -22,10 +33,22 @@ REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
 CC=${CC:-cc}
 MOJO=${MOJO:-mojo}
 OUT="$SCRIPT_DIR/.build"
-DYLIB="$REPO_ROOT/libmojito_sys.dylib"
+BUILD_RETRIES=3
+
+case "$(uname -s)" in
+    Darwin)
+        SOEXT=dylib
+        LD_ENV=DYLD_LIBRARY_PATH
+        ;;
+    *)
+        SOEXT=so
+        LD_ENV=LD_LIBRARY_PATH
+        ;;
+esac
+DYLIB="$REPO_ROOT/libmojito_sys.$SOEXT"
 PROBE="$OUT/t_guard_stress.o"
 
-DRIVERS="guard_page_test no_move_test growth_stress"
+DRIVERS="guard_page_test no_move_test growth_stress_test"
 
 if ! command -v "$CC" >/dev/null 2>&1; then
     echo "ERROR: cc not found on PATH; set CC=<path-to-cc>"
@@ -37,6 +60,11 @@ if ! command -v "$MOJO" >/dev/null 2>&1; then
     echo "RESULT: toolchain unavailable"
     exit 2
 fi
+if [ ! -f "$DYLIB" ]; then
+    echo "ERROR: $DYLIB not found; run \`make test-s1\` at the repo root first."
+    echo "RESULT: RUN-ERROR (library not built)"
+    exit 2
+fi
 
 mkdir -p "$OUT"
 
@@ -44,7 +72,7 @@ failures=0
 say() { printf '%s\n' "$*"; }
 
 # Build the shared guard-fork probe once.
-if ! "$CC" -arch arm64 -c "$SCRIPT_DIR/t_guard_stress.c" -o "$PROBE"; then
+if ! "$CC" -c "$SCRIPT_DIR/t_guard_stress.c" -o "$PROBE"; then
     say "ERROR: probe build failed (t_guard_stress.c)"
     exit 2
 fi
@@ -53,24 +81,26 @@ run_driver() { # <name>  name = <name>.mojo in SCRIPT_DIR
     name=$1
     driver="$SCRIPT_DIR/$name.mojo"
     bin="$OUT/$name"
-    # The drivers reference mjs_* directly from Mojo (@extern), so the
-    # symbols must resolve at LINK time. While the vm/stack/build lanes are
-    # unmerged there is no libmojito_sys.dylib: strict ld keeps the red an
-    # explicit unresolved-symbol verdict. Once the dylib exists (build lane),
-    # link against it; DYLD_LIBRARY_PATH still resolves it at run time.
-    lib_flags=""
-    if [ -f "$DYLIB" ]; then
-        lib_flags="-Xlinker -L$REPO_ROOT -Xlinker -lmojito_sys"
-    fi
-    if ! "$MOJO" build "$driver" -o "$bin" \
-        -I "$REPO_ROOT" -Xlinker "$PROBE" $lib_flags \
-        2>"$OUT/$name.build.log"; then
-        say "== $name FAIL (driver build)"
-        tail -n 8 "$OUT/$name.build.log" | sed 's/^/     | /'
+    log="$OUT/$name.build.log"
+    attempt=1
+    built=0
+    while [ $attempt -le $BUILD_RETRIES ]; do
+        if "$MOJO" build "$driver" -o "$bin" \
+            -I "$REPO_ROOT" -I "$SCRIPT_DIR" \
+            -Xlinker "$PROBE" -Xlinker "-L$REPO_ROOT" -Xlinker -lmojito_sys \
+            2>"$log"; then
+            built=1
+            break
+        fi
+        attempt=$((attempt + 1))
+    done
+    if [ $built -eq 0 ]; then
+        say "== $name FAIL (driver build, after $BUILD_RETRIES attempts)"
+        tail -n 8 "$log" | sed 's/^/     | /'
         failures=$((failures + 1))
         return
     fi
-    out=$(DYLD_LIBRARY_PATH="$REPO_ROOT" "$bin" 2>&1)
+    out=$(env "$LD_ENV=$REPO_ROOT" "$bin" 2>&1)
     st=$?
     if [ $st -eq 0 ]; then
         say "== $name PASS"
@@ -81,6 +111,8 @@ run_driver() { # <name>  name = <name>.mojo in SCRIPT_DIR
     fi
 }
 
+total=$(printf '%s\n' $DRIVERS | wc -l | tr -d ' ')
+
 say "== S1 stress lane (issue #31) — builds in $OUT"
 for t in $DRIVERS; do
     run_driver "$t"
@@ -89,7 +121,7 @@ done
 say ""
 say "S1 stress matrix (issue #31)"
 if [ "$failures" -ne 0 ]; then
-    say "RESULT: $failures/3 FAILED"
+    say "RESULT: $failures/$total FAILED"
     exit 1
 fi
 say "RESULT: all green"
