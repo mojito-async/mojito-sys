@@ -17,16 +17,24 @@
 # mojito_sys/memory/page.mojo):
 #   - @extern("<c_symbol>") + abi("C") + `...` body; dylib chosen at link
 #     time (-Xlinker libmojito_sys.dylib).
-#   - UnsafePointer origin must be concrete in extern signatures: raw
-#     addresses handed to / received from C are MutAnyOrigin; scratch slots
-#     carved out with std.memory.stack_allocation are MutUntrackedOrigin.
+#   - UnsafePointer origins must be concrete in extern signatures: every
+#     slot handed to / received from C is MutAnyOrigin (see ORIGIN HAZARD
+#     at OutSlots below); stack_allocation scratch is fine as long as it
+#     crosses an extern boundary only through that alias.
 #   - def only (fn removed on b2); destructors are def __deinit__(deinit self).
 
 from std.memory import stack_allocation
 
 # C `void *` transported as a machine word (Int is 64-bit on LP64). Out-slots
 # are cells holding raw addresses that C reads/writes through.
-comptime OutSlots = UnsafePointer[Int, MutUntrackedOrigin]
+#
+# ORIGIN HAZARD (StressLane, PR #39): UnsafePointer[Int, MutUntrackedOrigin]
+# out-slots on OPAQUE extern calls get their post-call loads hoisted ABOVE
+# the call under optimization, so Mojo re-reads stale pre-call slot words
+# instead of what C wrote. Every slot handed to an extern here is therefore
+# MutAnyOrigin: loads through that origin may not be reordered across the
+# opaque call, so each op observes its own post-call slot values.
+comptime OutSlots = UnsafePointer[Int, MutAnyOrigin]
 
 @extern("mjs_stack_alloc")
 def mjs_stack_alloc(

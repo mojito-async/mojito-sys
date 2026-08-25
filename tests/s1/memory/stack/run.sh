@@ -8,9 +8,10 @@
 # The driver forks a child in C (probe) for the guard-region proof:
 # a deliberate write into the PROT_NONE guard page must raise a synchronous
 # hardware fault (SIGBUS on macOS arm64, SIGSEGV elsewhere) without touching
-# the parent. Growth uses the frozen mjs_vm_commit service; until the vm
-# lane lands, the dylib lacks it and this suite reports RED/FAIL — the
-# expected TDD-red state (issues #29/#30).
+# the parent. Growth links the frozen mjs_vm_commit service (vm lane,
+# issue #29 / PR #41): until that PR merges into main, build this suite
+# against a throwaway merge carrying native/posix/mjs_vm.c — never commit
+# a copy of another lane's file here.
 #
 # Usage: tests/s1/memory/stack/run.sh
 #   MOJO=/path/to/mojo overrides the compiler. CC=<cc> overrides cc.
@@ -50,9 +51,10 @@ if ! "$CC" -c "$SCRIPT_DIR/s1_stack_probe.c" -o "$OUT/s1_stack_probe.o"; then
 fi
 
 if ! "$MOJO" build "$SCRIPT_DIR/stack_test.mojo" -o "$OUT/stack_test" \
-    -I "$REPO_ROOT" -Xlinker "$OUT/s1_stack_probe.o" \
+    -I "$REPO_ROOT" \
+    -Xlinker "$OUT/s1_stack_probe.o" -Xlinker "$DYLIB" \
     2>"$OUT/stack_test.build.log"; then
-    echo "$TEST_NAME RED (driver build failed - package scaffold/build lane not merged yet)"
+    echo "$TEST_NAME RED (driver build failed)"
     tail -n 8 "$OUT/stack_test.build.log" | sed 's/^/    | /'
     exit 1
 fi

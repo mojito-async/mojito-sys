@@ -84,7 +84,7 @@ int mjs_stack_alloc(
 {
     if (out_base == NULL || out_guard_low == NULL || out_top == NULL) {
         errno = EINVAL;
-        return -1;
+        return -EINVAL;
     }
 
     size_t ps = page_size();
@@ -97,14 +97,14 @@ int mjs_stack_alloc(
 
     if (guard > SIZE_MAX - usable) {
         errno = EINVAL;
-        return -1;
+        return -EINVAL;
     }
     size_t total = guard + usable;
 
     /* Whole region PROT_NONE first: a pure reservation. */
     void *base = mmap(NULL, total, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (base == MAP_FAILED)
-        return -1;
+        return -errno;
 
     /* Commit the TOP initial_commit bytes only; never touches the guard. */
     size_t commit = round_up(initial_commit_bytes, ps);
@@ -117,7 +117,7 @@ int mjs_stack_alloc(
             int saved = errno;
             munmap(base, total);
             errno = saved;
-            return -1;
+            return -(saved != 0 ? saved : EIO);
         }
     }
 
@@ -136,7 +136,7 @@ int mjs_stack_alloc(
             if (grown == NULL) {
                 munmap(base, total);
                 errno = ENOMEM;
-                return -1;
+                return -ENOMEM;
             }
             g_resv = grown;
             g_resv_cap = cap;
@@ -160,7 +160,7 @@ int mjs_stack_free(void **base) {
         if (g_resv[i].base == *base) {
             int rc = munmap(*base, g_resv[i].total);
             if (rc != 0)
-                return -1;
+                return -errno;
             g_resv[i].base = NULL;
             g_resv[i].total = 0;
             *base = NULL;
@@ -169,5 +169,5 @@ int mjs_stack_free(void **base) {
     }
     /* Address not allocated by us: refuse rather than munmap a stranger. */
     errno = EINVAL;
-    return -1;
+    return -EINVAL;
 }
