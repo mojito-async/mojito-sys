@@ -22,6 +22,7 @@
 #include <string.h>
 #include <sched.h>
 #include <time.h>
+#include <errno.h>
 
 static int failures = 0;
 
@@ -144,15 +145,7 @@ static void case_concurrent_32(void) {
           "concurrent: 32 simultaneous spawn/join with distinct statuses");
 }
 
-/* Reserved helper for a future barrier-synchronized variant; kept trivially
- * complete so the prototype never warns. */
-static void run_concurrent_worker(long idx, pthread_barrier_t *bar,
-                                  mjs_thread **slots, long *statuses) {
-    (void)idx; (void)bar; (void)slots; (void)statuses;
-}
-
 static void case_detach_then_exit(void) {
-    /* 4a: detached worker runs to completion safely. */
     {
         mjs_thread *t = NULL;
         atomic_int done = 0;
