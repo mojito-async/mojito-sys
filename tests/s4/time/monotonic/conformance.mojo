@@ -114,7 +114,7 @@ def _median3(a: Float64, b: Float64, c: Float64) -> Float64:
 # One cross-check sample: our-clock delta vs raw-clock delta over the SAME
 # ~70 ms window (inside the 50–100ms spec band). Returns 0.0 on harness
 # failure (budget exhausted), which the caller rejects explicitly.
-def _one_ratio() -> Float64:
+def _one_ratio() raises -> Float64:
     var window = NS_PER_SEC * UInt64(70) // UInt64(1000)
     var r0 = _raw_now_ns()
     var o0 = monotonic_now()
