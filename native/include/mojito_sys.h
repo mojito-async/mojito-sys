@@ -181,18 +181,37 @@ int mjs_thread_set_name(const char *name);
 
 /* Mint a TLS key whose per-thread values are passed to `destructor`
  * (may be NULL) at thread exit. 0 on success with *out_key = new key;
- * negative errno on failure, *out_key untouched. */
+ * negative errno on failure, *out_key untouched.
+ * Blocking (SYS-5): may block briefly on the global registry mutex and
+ * inside pthread_key_create.
+ * Allocation: may grow the key registry under the lock (one realloc);
+ * issues one pthread_key_create syscall.
+ * Task-aware: no — bindings are OS-thread-scoped, never task-scoped. */
 int mjs_tls_create(ms_callback destructor, uintptr_t *out_key);
 
 /* Calling thread's value for `key`; NULL when unset or key invalid.
- * Never allocates. */
+ * Never allocates.
+ * Blocking (SYS-5): holds the global registry mutex across a brief
+ * key-validation critical section (may wait under contention);
+ * pthread_getspecific itself does not block.
+ * Allocation: none (SYS-4 names TLS reads as must-not-allocate).
+ * Task-aware: no. */
 void *mjs_tls_get(uintptr_t key);
 
-/* Set the calling thread's value for `key`. -EINVAL for an invalid key. */
+/* Set the calling thread's value for `key`. -EINVAL for an invalid key.
+ * Blocking (SYS-5): holds the global registry mutex across a brief
+ * validate-then-set critical section (may wait under contention).
+ * Allocation: none.
+ * Task-aware: no. */
 int mjs_tls_set(uintptr_t key, void *value);
 
 /* Delete `key`. -EINVAL if invalid/double-destroyed. A destructor does NOT
- * run for values still bound at delete time (POSIX semantics). */
+ * run for values still bound at delete time (POSIX semantics).
+ * Blocking (SYS-5): holds the global registry mutex across a brief
+ * validate-and-retire critical section, released BEFORE pthread_key_delete
+ * runs (no host call under the lock).
+ * Allocation: none.
+ * Task-aware: no. */
 int mjs_tls_destroy(uintptr_t key);
 
 #ifdef __cplusplus
