@@ -7,3 +7,4 @@
 # green — an unlisted failure blocks the commit.
 #
 # Rows are matched on the <test-name> printed by the suite (e.g. `bench`,
+s1-tests	#31
