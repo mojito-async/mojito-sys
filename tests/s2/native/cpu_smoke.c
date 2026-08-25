@@ -24,6 +24,10 @@
  *
  * Exit status 0 = all checks passed; nonzero = failures (count printed).
  */
+#ifdef __linux__
+#define _GNU_SOURCE /* sched_[gs]etaffinity; must precede libc includes */
+#endif
+
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
