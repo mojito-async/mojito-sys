@@ -41,7 +41,9 @@ for t in $TESTS; do
     # Build the lane dylib from this lane's C source (no Makefile change).
     mkdir -p "$BUILD_DIR"
     if ! "$CC" -O2 -g -Wall -Wextra -I"$REPO_ROOT/native/include" \
-         -c "$REPO_ROOT/native/posix/mjs_vm.c" -o "$BUILD_DIR/mjs_vm.o" 2>"$BUILD_DIR/cc.err"; then
+         -c "$REPO_ROOT/native/posix/mjs_vm.c" -o "$BUILD_DIR/mjs_vm.o" 2>"$BUILD_DIR/cc.err" ||
+       ! "$CC" -O2 -g -Wall -Wextra -I"$REPO_ROOT/native/include" \
+         -c "$REPO_ROOT/native/posix/mjs_page.c" -o "$BUILD_DIR/mjs_page.o" 2>>"$BUILD_DIR/cc.err"; then
         echo "== $t"
         echo "   | mjs_vm.c build failed (native/posix/mjs_vm.c or frozen header missing); TDD-red"
         echo "$t FAIL"
@@ -51,7 +53,8 @@ for t in $TESTS; do
         echo "RESULT: 1/1 FAILED"
         exit 1
     fi
-    if ! "$CC" -dynamiclib -o "$DYLIB" "$BUILD_DIR/mjs_vm.o" 2>"$BUILD_DIR/ld.err"; then
+    if ! "$CC" -dynamiclib -o "$DYLIB" "$BUILD_DIR/mjs_vm.o" \
+         "$BUILD_DIR/mjs_page.o" 2>"$BUILD_DIR/ld.err"; then
         echo "== $t"
         echo "   | dylib link failed; TDD red"
         echo "$t FAIL"
@@ -60,6 +63,18 @@ for t in $TESTS; do
         echo "  $t FAIL"
         echo "RESULT: 1/1 FAILED"
         exit 1
+
+    fi
+
+    # Panel H5: C-level reserve-corner probe (granularity rounding).
+    if ! "$CC" -O2 -g -Wall -Wextra -I"$REPO_ROOT/native/include" \
+         "$SCRIPT_DIR/vm_probe.c" -o "$BUILD_DIR/vm_probe" \
+         "$DYLIB" 2>"$BUILD_DIR/probe_cc.err"; then
+        echo "   | vm_probe.c build failed; TDD-red"
+        failures=$((failures + 1))
+    elif ! "$BUILD_DIR/vm_probe"; then
+        echo "   | vm_probe FAILED"
+        failures=$((failures + 1))
     fi
 
     # The b2 toolchain intermittently segfaults while lowering
