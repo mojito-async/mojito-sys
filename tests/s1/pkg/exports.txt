@@ -21,3 +21,7 @@ mjs_thread_join
 mjs_thread_detach
 mjs_thread_self_id
 mjs_thread_set_name
+mjs_tls_create
+mjs_tls_get
+mjs_tls_set
+mjs_tls_destroy
