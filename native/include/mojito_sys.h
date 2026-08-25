@@ -214,6 +214,29 @@ int mjs_tls_set(uintptr_t key, void *value);
  * Task-aware: no. */
 int mjs_tls_destroy(uintptr_t key);
 
+/* --- s2-cpu --- */
+/* CPU information and affinity (spec §13). Topology information is
+ * ADVISORY. Affinity applies to the CALLING THREAD ONLY. Deliberately no
+ * get-API (SYS-1): the spec asks set-only. */
+
+/* Logical CPU count visible to this process (sysconf/sysctl); > 0. */
+int mjs_cpu_logical(void);
+
+/* Physical CPU (package core) count. Best-effort: 0 with *out > 0 when the
+ * host exposes the value; EXACTLY -ENOTSUP when undeterminable, with *out
+ * untouched (maps to Optional[Int] upstream; SYS-7 divergence is VISIBLE).
+ * Never any other errno. */
+int mjs_cpu_physical(int *out);
+
+/* Pin the calling thread (spec L914-921) to the CPUs selected by `mask`:
+ * bit i of word w selects logical CPU w*64 + i. mask == NULL or
+ * nwords == 0 is -EINVAL. Linux: sched_setaffinity on the calling thread.
+ * Darwin: thread_policy_set best-effort; hosts without thread-affinity
+ * support return exactly -ENOTSUP. Where the call SUCCEEDS, the mask
+ * contents are ignored: the policy is a coarse prefer-current-core hint,
+ * not an exact pin — 0 does not promise the exact set was applied. */
+int mjs_cpu_affinity_set_current(const uint64_t *mask, unsigned nwords);
+
 #ifdef __cplusplus
 }
 #endif
