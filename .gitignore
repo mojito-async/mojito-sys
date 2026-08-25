@@ -7,7 +7,6 @@
 *.dylib
 /build/
 tests/spike/.build/
-tests/s1/stress/.build/
 
 # Spike local outputs
 spike/context_switch/out/
