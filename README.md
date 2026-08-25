@@ -37,16 +37,6 @@ Spike contract: hypothesis, prototype scope, semantic tests S0-T1..T14,
 benchmarks, deliverables, and GO/CONDITIONAL GO/NO-GO criteria live in spec
 Section 6 and in [spike/context_switch/README.md](spike/context_switch/README.md).
 
-## S1 stress lane charter
-
-`tests/s1/stress` currently owns memory-only coverage (guarded-stack
-geometry, downward growth via `mjs_vm_commit`, non-moving frames, guard
-faults). Its charter is deliberately broader from S2 on: cross-domain
-stress interleaving stack growth with context switching, callbacks, and
-error propagation once those lanes land (#29/#30/#35). The lane keeps its
-`tests/s1/stress` location; this note records the scope so the directory
-name does not overpromise today.
-
 ## Toolchain
 
 Mojo 1.0.0b2 baseline (`mojolang` Homebrew package from the local
