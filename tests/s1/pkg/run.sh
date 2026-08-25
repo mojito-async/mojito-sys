@@ -1,13 +1,17 @@
 #!/bin/sh
-# mojito-sys S1 — packaged-library smoke lane (issue #24).
+# mojito-sys S1 — packaged-library conformance lane (issue #24).
 #
-# Links a C translation unit that references every entry point declared in
-# native/include/mojito_sys.h against libmojito_sys.dylib, so a missing
-# export is a red build, not a load-time surprise.
-#
-# RED until the memory-vm / memory-stack lanes land (their entry points are
-# declared by the frozen header but not implemented). Covered by the
-# aggregate `s1-tests` known-red row until all S1 lanes merge.
+# Four checks over the packaged libmojito_sys.dylib + mojito_sys package:
+#   1. header-shape   — compile a TU that type-checks EVERY entry point of
+#                       the frozen native/include/mojito_sys.h (smoke.c);
+#   2. link+run       — a C consumer of the implemented exports links
+#                       against the dylib and validates runtime values
+#                       (link_smoke.c): ABI version + page size;
+#   3. export table   — `nm -gU` of the dylib must equal tests/s1/pkg/
+#                       exports.txt in BOTH directions (panel H2: gaps are
+#                       loud, not silent; lanes append on landing);
+#   4. mojo import    — the `mojito_sys` package import path compiles and
+#                       runs with -I <repo root> (import_check.mojo).
 #
 # Usage: tests/s1/pkg/run.sh    MOJO=/path/to/mojo CC=/path/to/cc (optional)
 
@@ -16,46 +20,52 @@ set -u
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
 CC=${CC:-cc}
+MOJO=${MOJO:-mojo}
 OUT="$SCRIPT_DIR/.build"
+DYLIB="$REPO_ROOT/libmojito_sys.dylib"
 
 failures=0
-say() { printf '%s\n' "$*"; }
+check() { # <name> <command...>
+    name=$1
+    shift
+    log="$OUT/$name.log"
+    if ! "$@" >"$log" 2>&1; then
+        printf '%s FAIL\n' "$name"
+        tail -n 8 "$log" | sed 's/^/    | /'
+        failures=$((failures + 1))
+        return 1
+    fi
+    printf '%s PASS\n' "$name"
+}
 
-if ! command -v "$CC" >/dev/null 2>&1; then
-    say "ERROR: CC=$CC not found"
-    exit 2
-fi
-if [ ! -f "$REPO_ROOT/libmojito_sys.dylib" ]; then
-    say "ERROR: $REPO_ROOT/libmojito_sys.dylib not found; run \`make\` at the repo root first."
-    exit 2
-fi
+command -v "$CC" >/dev/null 2>&1 || { echo "ERROR: CC=$CC not found"; exit 2; }
+[ -f "$DYLIB" ] || { echo "ERROR: $DYLIB not found; run \`make\` at the repo root first."; exit 2; }
 
 mkdir -p "$OUT"
 
-# 1. Compile the header consumer.
-if ! "$CC" -I"$REPO_ROOT/native/include" -c "$SCRIPT_DIR/smoke.c" -o "$OUT/smoke.o" 2>"$OUT/compile.log"; then
-    say "smoke-header-abi FAIL (compile)"
-    sed 's/^/    | /' "$OUT/compile.log" | tail -n 8
-    say "RESULT: 1 FAILED"
-    exit 1
+# 1. Frozen-header ABI shape: every declared signature type-checked.
+check header-shape "$CC" -I"$REPO_ROOT/native/include" -c "$SCRIPT_DIR/smoke.c" -o "$OUT/smoke.o"
+# 2. Link + run a consumer of the implemented export set.
+if check link-smoke "$CC" -I"$REPO_ROOT/native/include" "$SCRIPT_DIR/link_smoke.c" "$DYLIB" -o "$OUT/link_smoke"; then
+    check link-smoke-run env DYLD_LIBRARY_PATH="$REPO_ROOT" "$OUT/link_smoke"
 fi
 
-# 2. Link against the packaged dylib (unresolved exports = red).
-if ! "$CC" "$OUT/smoke.o" "$REPO_ROOT/libmojito_sys.dylib" -o "$OUT/smoke" 2>"$OUT/link.log"; then
-    say "smoke-header-abi FAIL (link: declared entry point not exported)"
-    sed 's/^/    | /' "$OUT/link.log" | tail -n 8
-    say "RESULT: 1 FAILED"
-    exit 1
+# 3. Packaging conformance: dylib export table == expected list, exactly.
+nm -gU "$DYLIB" | awk 'NF >= 3 {print $3}' | sed 's/^_//' | sort >"$OUT/exports.actual"
+sed -e 's/#.*$//' -e '/^[[:space:]]*$/d' "$SCRIPT_DIR/exports.txt" | sed 's/[[:space:]]//g' | sort >"$OUT/exports.expected"
+if diff -u "$OUT/exports.expected" "$OUT/exports.actual" >"$OUT/exports.diff"; then
+    echo "export-conformance PASS"
+else
+    echo "export-conformance FAIL (dylib export table != exports.txt)"
+    failures=$((failures + 1))
 fi
 
-# 3. Run it (does not deref anything; returns 0).
-if ! DYLD_LIBRARY_PATH="$REPO_ROOT" "$OUT/smoke" >/dev/null 2>&1; then
-    say "smoke-header-abi FAIL (run)"
-    say "RESULT: 1 FAILED"
+# 4. Mojo package scaffold imports and loads from the repo root.
+check mojo-pkg-import "$MOJO" -I "$REPO_ROOT" "$SCRIPT_DIR/import_check.mojo"
+
+if [ "$failures" -ne 0 ]; then
+    echo "RESULT: $failures FAILED"
     exit 1
 fi
-
-say "smoke-header-abi PASS"
-say "smoke-header-compile PASS"
-say "RESULT: all green"
+echo "RESULT: all green"
 exit 0

@@ -1,40 +1,47 @@
-/* mojito-sys S1 — packaged-library smoke (issue #24).
+/* mojito-sys S1 — packaged-library smoke, part 1: frozen-header ABI shape.
  *
- * References EVERY entry point declared by native/include/mojito_sys.h by
- * address so the linker requires each symbol to resolve from
- * libmojito_sys.dylib. A missing export = link failure = red lane.
+ * Compile-only translation unit: assigns EVERY entry point declared by
+ * native/include/mojito_sys.h to a correctly-typed function pointer, so any
+ * signature drift in the frozen header breaks this build. It also pins the
+ * frozen callback ABI (ms_callback + mjs_callback_token).
  *
- * This is intentionally a TDD-red lane: the vm/stack entry points ship in
- * the S1 memory lanes; until they merge, this lane stays red (covered by
- * the aggregate `s1-tests` known-red row, removed when all lanes land).
+ * Deliberately NOT linked: export coverage is the packaging conformance
+ * check in run.sh (exports.txt vs the dylib export table) and the runtime
+ * smoke is link_smoke.c. Linking against not-yet-implemented entry points
+ * here would keep the whole lane red until every S1 memory lane merges,
+ * which contradicts the panel H2 design: assert the CURRENTLY-EXPECTED
+ * export list so gaps are loud, not permanently red.
  *
- * Build: cc -I native/include -c smoke.c, then link against
- * libmojito_sys.dylib.
+ * Build: cc -I native/include -c smoke.c
  */
+
 #include "mojito_sys.h"
 #include <stddef.h>
 
-int (*const ref_simple[])(void) = {
-    mjs_page_size,
-    mjs_granularity,
-    mjs_abi_version,
+/* Frozen callback ABI: one two-word token (code address + userdata). */
+_Static_assert(sizeof(mjs_callback_token) == 2 * sizeof(void *),
+               "mjs_callback_token must remain a two-word token");
+
+static void s1_cb_sink(void *userdata) { (void)userdata; }
+static ms_callback const s1_cb_ok = s1_cb_sink;
+
+/* Signature guards: an incompatible declaration fails to compile here. */
+static int (*const p_page_size)(void) = mjs_page_size;
+static int (*const p_granularity)(void) = mjs_granularity;
+static int (*const p_abi_version)(void) = mjs_abi_version;
+static int (*const p_vm_reserve)(size_t, void **, size_t *) = mjs_vm_reserve;
+static int (*const p_vm_commit)(unsigned char **, size_t) = mjs_vm_commit;
+static int (*const p_vm_decommit)(unsigned char **, size_t) = mjs_vm_decommit;
+static int (*const p_vm_protect)(unsigned char *, size_t, int) = mjs_vm_protect;
+static int (*const p_vm_release)(void **, size_t) = mjs_vm_release;
+static int (*const p_stack_alloc)(size_t, size_t, size_t, void **, void **,
+                                  size_t *) = mjs_stack_alloc;
+static int (*const p_stack_free)(void **) = mjs_stack_free;
+
+/* Keep every guard live so none can be elided as dead initializers. */
+void *const s1_shape_refs[] = {
+    (void *)p_page_size,   (void *)p_granularity, (void *)p_abi_version,
+    (void *)p_vm_reserve,  (void *)p_vm_commit,   (void *)p_vm_decommit,
+    (void *)p_vm_protect,  (void *)p_vm_release,  (void *)p_stack_alloc,
+    (void *)p_stack_free,  (void *)s1_cb_ok,
 };
-
-static int (*const ref_reserve)(size_t, void **, size_t *) = mjs_vm_reserve;
-static int (*const ref_commit)(unsigned char **, size_t) = mjs_vm_commit;
-static int (*const ref_decommit)(unsigned char **, size_t) = mjs_vm_decommit;
-static int (*const ref_protect)(unsigned char *, size_t, int) = mjs_vm_protect;
-static int (*const ref_release)(void **, size_t) = mjs_vm_release;
-static int (*const ref_stack_alloc)(size_t, size_t, size_t, void **, void **, size_t *) = mjs_stack_alloc;
-static int (*const ref_stack_free)(void **) = mjs_stack_free;
-
-int main(void) {
-    /* Take addresses so the linker must resolve every entry point. */
-    void *refs[10] = {
-        (void *)ref_simple[0], (void *)ref_simple[1], (void *)ref_simple[2],
-        (void *)ref_reserve, (void *)ref_commit, (void *)ref_decommit,
-        (void *)ref_protect, (void *)ref_release,
-        (void *)ref_stack_alloc, (void *)ref_stack_free,
-    };
-    return refs[9] != 0 ? 0 : 1;
-}
