@@ -244,13 +244,19 @@ int mjs_cpu_affinity_set_current(const uint64_t *mask, unsigned nwords);
  * through the mach_timebase_info ratio, cached via pthread_once so the
  * calibration happens once per process). The value is a non-decreasing
  * count of nanoseconds since an arbitrary epoch (NOT wall-clock time);
- * scheduler deadlines must be computed against this clock only.
- * On success returns 0 and stores the reading in *out_ns. */
+ * scheduler deadlines must be computed against this clock only. Values
+ * are opaque ticks for delta arithmetic only; they are NOT a timespec
+ * for any platform wait API.
+ * On success returns 0 and stores the reading in *out_ns. Failure returns
+ * a negative -errno and leaves *out_ns untouched; a NULL out-slot fails
+ * with -EFAULT. */
 int mjs_clock_now(uint64_t *out_ns);
 
 /* Resolution of the monotonic clock in nanoseconds (the smallest
  * non-zero tick difference the implementation can report; >= 1).
- * On success returns 0 and stores the resolution in *out_res_ns. */
+ * On success returns 0 and stores the resolution in *out_res_ns. Failure
+ * returns a negative -errno and leaves *out_res_ns untouched; a NULL
+ * out-slot fails with -EFAULT. */
 int mjs_clock_resolution(uint64_t *out_res_ns);
 
 #ifdef __cplusplus
