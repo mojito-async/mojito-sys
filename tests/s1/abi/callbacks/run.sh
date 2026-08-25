@@ -37,6 +37,28 @@ fi
 
 failures=0
 matrix=""
+
+# H2 pin (issue #32): b2's UnsafePointer is non-nullable — a literal
+# `unsafe_from_address=0` MUST stay a compile error. CallbackToken.unset()
+# is the only supported null-construction path; this fails fast if a
+# future toolchain ever accepts the literal, silently reopening a second
+# null path beside the factory.
+pin=$(mktemp "${TMPDIR:-/tmp}/mjs_null_pin.XXXXXX.mojo")
+trap 'rm -f "$pin"' EXIT
+cat > "$pin" <<'EOF'
+from mojito_sys.abi.callbacks import VoidPtr
+
+
+def main():
+    var p = VoidPtr(unsafe_from_address=0)
+EOF
+if "$MOJO" run -I "$REPO_ROOT" "$pin" >/dev/null 2>&1; then
+    echo "ERROR: nullability contract broken: literal unsafe_from_address=0 compiled"
+    for t in $TESTS; do
+        echo "$t FAIL (nullability pin)"
+    done
+    exit 3
+fi
 for t in $TESTS; do
     file="$SCRIPT_DIR/$t.mojo"
     out=$("$MOJO" run -I "$REPO_ROOT" "$file" 2>&1)
