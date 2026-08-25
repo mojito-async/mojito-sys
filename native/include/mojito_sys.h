@@ -100,7 +100,8 @@ int mjs_stack_alloc(size_t reserve, size_t initial_commit, size_t guard_bytes,
                     void **out_base, void **out_guard_low, size_t *out_top);
 
 /* Free a stack allocated by mjs_stack_alloc (whole reservation).
- * *base is NULLed on success. Returns 0 on success. */
+ * *base is NULLed on success. Double-free (already-NULL *base) is a
+ * -EINVAL error, mirroring mjs_vm_release. Returns 0 on success. */
 int mjs_stack_free(void **base);
 
 #ifdef __cplusplus
