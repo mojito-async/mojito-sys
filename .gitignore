@@ -18,3 +18,5 @@ __pycache__/
 .DS_Store
 tests/s1/*/.build/
 tests/s1/*/*/.build/
+tests/s2/*/.build/
+tests/s2/*/*/.build/
