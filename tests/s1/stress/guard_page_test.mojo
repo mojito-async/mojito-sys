@@ -1,12 +1,13 @@
 # S1-STRESS-GUARD — guarded-stack alignment + guard-page fault (issue #31).
 #
-# Drives the frozen S1 C ABI directly (@extern, abi("C")):
+# Drives the frozen S1 C ABI via the shared externs module
+# tests/s1/stress/stress_externs.mojo (single source of truth, review M3):
 #   mjs_page_size()
 #   mjs_stack_alloc(reserve_bytes, initial_commit_bytes, guard_bytes,
 #                   &out_base, &out_guard_low, &out_top)
 #   mjs_stack_free(&base)
-# and the companion fork probe from tests/s1/stress/t_guard_stress.c (linked
-# into this executable by run.sh via -Xlinker).
+# and the companion fork probe from tests/s1/stress/t_guard_stress.c
+# (linked into this executable by run.sh via -Xlinker).
 #
 # Requirements under test:
 #   1. out_top is 16-byte aligned (AAPCS64 sp-at-entry invariant);
@@ -17,67 +18,40 @@
 #      immediate contained protection fault, NOT silent adjacent-memory
 #      corruption. The guard fault runs in the child so the driver survives.
 #
-# The mojito-sys dylib resolves at runtime via DYLD_LIBRARY_PATH (see
-# run.sh). Until the build/vm/stack lanes land this driver cannot link and
-# fails red — the intent of issue #31's TDD-red.
+# Geometry derives from mjs_page_size() at run time (review M2): the C
+# allocator rounds reserve/initial_commit/guard up to whole pages, so the
+# request constants below stay correct on any page size.
 
 from std.memory import stack_allocation
 
-comptime BytePtr = UnsafePointer[Byte, MutAnyOrigin]
-comptime Out = UnsafePointer[Int, MutAnyOrigin]
+from stress_externs import (
+    c_exit,
+    mjs_page_size,
+    mjs_stack_alloc,
+    mjs_stack_free,
+    stress_guard_verdict,
+)
 
-comptime RESERVE_BYTES = 256 * 1024
-comptime INIT_COMMIT = 16 * 1024
+comptime RESERVE_BYTES = 256 * 1024     # usable span (page multiple)
+comptime INIT_COMMIT_REQ = 16 * 1024    # request; C rounds up to pages
 comptime GUARD_PAGES = 1
-
-
-@extern("mjs_page_size")
-def _mjs_page_size() abi("C") -> Int32:
-    ...
-
-
-@extern("mjs_stack_alloc")
-def _mjs_stack_alloc(
-    reserve_bytes: Int,
-    initial_commit_bytes: Int,
-    guard_bytes: Int,
-    out_base: Out,
-    out_guard_low: Out,
-    out_top: Out,
-) abi("C") -> Int32:
-    ...
-
-
-@extern("mjs_stack_free")
-def _mjs_stack_free(base_slot: Out) abi("C") -> Int32:
-    ...
-
-
-@extern("stress_guard_verdict")
-def _guard_verdict(base: Int, guard_bytes: Int) abi("C") -> Int32:
-    ...
-
-
-@extern("exit")
-def _c_exit(code: Int32) abi("C"):
-    ...
 
 
 def main():
     var fail = False
-    var ps = _mjs_page_size()
+    var ps = mjs_page_size()
     if ps <= 0 or (ps & (ps - 1)) != 0:
         print("S1-GUARD FAIL: mjs_page_size()=", ps, " is not a positive power of two")
-        _c_exit(1)
+        c_exit(1)
 
     var guard_bytes = Int(ps) * GUARD_PAGES
     var slots = stack_allocation[3, Int]()
-    var rc = _mjs_stack_alloc(
-        RESERVE_BYTES, INIT_COMMIT, guard_bytes, slots, slots + 1, slots + 2
+    var rc = mjs_stack_alloc(
+        RESERVE_BYTES, INIT_COMMIT_REQ, guard_bytes, slots, slots + 1, slots + 2
     )
     if rc != 0 or slots[] == 0 or (slots + 2)[] == 0:
         print("S1-GUARD FAIL: mjs_stack_alloc rc=", rc)
-        _c_exit(1)
+        c_exit(1)
 
     var base: Int = slots[]
     var top: Int = (slots + 2)[]
@@ -95,7 +69,7 @@ def main():
         fail = True
 
     if not fail:
-        var verdict = _guard_verdict(base, guard_bytes)
+        var verdict = stress_guard_verdict(base, guard_bytes)
         if verdict == 0:
             print(
                 "S1-GUARD PASS: top 16-aligned; highest byte writable; "
@@ -114,6 +88,7 @@ def main():
             print("S1-GUARD FAIL: waitpid failed while reaping the probe child")
             fail = True
 
-    _mjs_stack_free(slots)
+    mjs_stack_free(slots)
     if fail:
-        _c_exit(1)
+        c_exit(1)
+    print("RESULT: S1-GUARD green")
