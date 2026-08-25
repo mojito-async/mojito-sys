@@ -8,3 +8,4 @@
 # same commit that adds the implementation, keeping the check exact.
 mjs_page_size
 mjs_abi_version
+mjs_granularity
