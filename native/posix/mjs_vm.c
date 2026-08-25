@@ -125,9 +125,11 @@ int mjs_vm_release(void **base, size_t reserved) {
     if (base == NULL) {
         return fail(EINVAL);
     }
-    /* Double-release guard: a NULL base is already released. */
+    /* Frozen ABI (issue #24): double release — an already-NULL *base — is
+     * a -EINVAL error, not success. Callers that want idempotent release
+     * pre-check at their layer (the Mojo wrapper does). */
     if (*base == NULL) {
-        return 0;
+        return fail(EINVAL);
     }
     if (munmap(*base, reserved) != 0) {
         return fail(errno);
