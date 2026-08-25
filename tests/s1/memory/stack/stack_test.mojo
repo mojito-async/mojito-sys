@@ -14,11 +14,10 @@
 #      movement; descending stack writes exercise the deeper committed
 #      span without ever touching the guard.
 #
-# TDD-red note: the package scaffold (mojito_sys/__init__.mojo,
-# mojito_sys/memory/__init__.mojo) is owned by the S1Build lane; until that
-# lane merges this suite reports FAIL (unresolvable import). Green requires
-# the merged libmojito_sys.dylib with mjs_stack_alloc/free (stack lane) and
-# mjs_vm_commit (vm lane).
+# Green requires the merged libmojito_sys.dylib with mjs_stack_alloc/free
+# (stack lane) and mjs_vm_commit (vm lane, PR #41); until the vm lane merges
+# into main, verify growth against a throwaway merge carrying
+# native/posix/mjs_vm.c (never commit a copy of another lane's file).
 
 from mojito_sys.memory.stack import NativeStack
 
@@ -183,6 +182,31 @@ def main() raises:
             + "non-movement verified on create")
     else:
         print("grow FAIL: no progress and not raised")
+
+    # 5. regression guard: post-call out-slot reads are not hoisted --------
+    # StressLane (PR #39) hazard: with MutUntrackedOrigin out-slots the
+    # optimizer hoisted post-call slot loads ABOVE the opaque extern call,
+    # so a second op re-observed the first op's (stale) slot words. The
+    # extern slots are now MutAnyOrigin (see mojito_sys/memory/stack.mojo);
+    # two sequential creates must each observe their OWN self-consistent
+    # geometry, and neither may be perturbed by the other.
+    var ra = NativeStack.create(RESERVE, INITIAL_COMMIT, GUARD)
+    var rb = NativeStack.create(RESERVE, INITIAL_COMMIT, GUARD)
+    failures += check(
+        "sequential creates get distinct reservations",
+        ra.is_live() and rb.is_live()
+        and ra.base_address() != rb.base_address(),
+    )
+    failures += check(
+        "op2 observes its own post-call slot values",
+        rb.guard_low_address() == rb.base_address() + GUARD
+        and rb.top_address() == rb.base_address() + GUARD + RESERVE,
+    )
+    failures += check(
+        "op1 slot values unaffected by later op",
+        ra.guard_low_address() == ra.base_address() + GUARD
+        and ra.top_address() == ra.base_address() + GUARD + RESERVE,
+    )
 
     print("RESULT: all green" if failures == 0 else "RESULT: " + String(failures) + " FAILED")
     _finish(failures)
