@@ -24,7 +24,7 @@
 from std.memory import stack_allocation
 
 comptime BytePtr = UnsafePointer[Byte, MutAnyOrigin]
-comptime Out = UnsafePointer[Int, MutUntrackedOrigin]
+comptime Out = UnsafePointer[Int, MutAnyOrigin]
 
 comptime RESERVE_BYTES = 256 * 1024
 comptime INIT_COMMIT = 16 * 1024
@@ -49,7 +49,7 @@ def _mjs_stack_alloc(
 
 
 @extern("mjs_stack_free")
-def _mjs_stack_free(base_slot: Out) abi("C"):
+def _mjs_stack_free(base_slot: Out) abi("C") -> Int32:
     ...
 
 

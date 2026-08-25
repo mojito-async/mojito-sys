@@ -18,7 +18,7 @@
 set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
 CC=${CC:-cc}
 MOJO=${MOJO:-mojo}
 OUT="$SCRIPT_DIR/.build"
@@ -53,8 +53,18 @@ run_driver() { # <name>  name = <name>.mojo in SCRIPT_DIR
     name=$1
     driver="$SCRIPT_DIR/$name.mojo"
     bin="$OUT/$name"
+    # The drivers reference mjs_* directly from Mojo (@extern), so the
+    # symbols must resolve at LINK time. While the vm/stack/build lanes are
+    # unmerged there is no libmojito_sys.dylib: strict ld keeps the red an
+    # explicit unresolved-symbol verdict. Once the dylib exists (build lane),
+    # link against it; DYLD_LIBRARY_PATH still resolves it at run time.
+    lib_flags=""
+    if [ -f "$DYLIB" ]; then
+        lib_flags="-Xlinker -L$REPO_ROOT -Xlinker -lmojito_sys"
+    fi
     if ! "$MOJO" build "$driver" -o "$bin" \
-        -I "$REPO_ROOT" -Xlinker "$PROBE" 2>"$OUT/$name.build.log"; then
+        -I "$REPO_ROOT" -Xlinker "$PROBE" $lib_flags \
+        2>"$OUT/$name.build.log"; then
         say "== $name FAIL (driver build)"
         tail -n 8 "$OUT/$name.build.log" | sed 's/^/     | /'
         failures=$((failures + 1))
