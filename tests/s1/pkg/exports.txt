@@ -9,3 +9,8 @@
 mjs_page_size
 mjs_abi_version
 mjs_granularity
+mjs_vm_reserve
+mjs_vm_commit
+mjs_vm_decommit
+mjs_vm_protect
+mjs_vm_release

@@ -97,6 +97,26 @@ def main() raises:
     if not ok:
         failures += 1
 
-    print("RESULT: " + String(12 - failures) + "/12 PASSED")
+    # VM9 — regression guard (StressLane -O hazard, PR #41): two reserves in
+    # sequence must each observe their OWN post-call out-slot values. If the
+    # optimizer hoists slot loads above the opaque extern call, the second
+    # reserve reads stale slots from the first and the bases collide or sizes
+    # go wrong.
+    var vm_a = VirtualMemory.reserve(2 * ps)
+    var vm_b = VirtualMemory.reserve(2 * ps)
+    ok = check(
+        "VM9a sequential reserves distinct live bases",
+        vm_a.base != 0 and vm_b.base != 0 and vm_a.base != vm_b.base,
+    )
+    if not ok:
+        failures += 1
+    ok = check(
+        "VM9b sequential reserves own sizes",
+        vm_b.reserved_bytes == 2 * ps and vm_a.reserved_bytes == 2 * ps,
+    )
+    if not ok:
+        failures += 1
+
+    print("RESULT: " + String(14 - failures) + "/14 PASSED")
     if failures != 0:
         raise Error("VirtualMemory conformance FAILED (issue #29)")
