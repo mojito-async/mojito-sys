@@ -46,8 +46,12 @@ comptime PROT_EXEC = 0x04
 comptime PAGESIZE = 16384
 
 # C `void *` transported as a machine word (Int is 64-bit on LP64). Out-slots
-# are cells holding raw addresses that C reads/writes through.
-comptime OutSlots = UnsafePointer[Int, MutUntrackedOrigin]
+# are cells holding raw addresses that C reads/writes through. The origin MUST
+# be MutAnyOrigin: these pointers escape into an opaque @extern callee, and an
+# UntrackedOrigin-typed slot lets the optimizer hoist the post-call slot load
+# ABOVE the call, reading stale garbage (StressLane -O hazard). MutAnyOrigin
+# marks the pointer as ABI-escaping, pinning the load after the call.
+comptime OutSlots = UnsafePointer[Int, MutAnyOrigin]
 
 
 # ---------------------------------------------------------------------------
