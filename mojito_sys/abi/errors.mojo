@@ -4,7 +4,11 @@
 # code within that domain. Mojo 1.0.0b2 has no enum sugar, so the domain
 # tags are comptime struct members (POSIX, MACH, INTERNAL, WIN32, WSA, API);
 # equality is by value, which also makes them safe to copy and compare by
-# `==`.
+#
+# Spec §7.3 amendment (recorded per review M1): the spec's `POSIX_ERRNO`
+# domain tag ships as `POSIX` here, decided while the ABI was still
+# unmerged (free now, ABI-breaking later). WSA is retained; `API` vs
+# `INTERNAL` semantics are documented on `ErrorDomain` below.
 #
 # `SysError.to_string()` is a diagnostic aid ONLY — it is explicitly off the
 # hot path, and its output is NOT a stable API; consumers must not parse it.
