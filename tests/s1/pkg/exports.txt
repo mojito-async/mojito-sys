@@ -25,3 +25,6 @@ mjs_tls_create
 mjs_tls_get
 mjs_tls_set
 mjs_tls_destroy
+mjs_cpu_logical
+mjs_cpu_physical
+mjs_cpu_affinity_set_current
