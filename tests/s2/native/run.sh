@@ -18,9 +18,8 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
 CC=${CC:-cc}
 OUT="$SCRIPT_DIR/.build"
-DYLIB="$REPO_ROOT/libmojito_sys.dylib"
-
-if ! make -C "$REPO_ROOT" "$DYLIB" >/dev/null 2>&1; then
+DYLIB="libmojito_sys.dylib"
+if ! make -C "$REPO_ROOT" libmojito_sys.dylib >/dev/null 2>&1; then
     echo "ERROR: cannot build $DYLIB; run \`make\` at the repo root."
     exit 2
 fi

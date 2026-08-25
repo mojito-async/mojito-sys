@@ -16,6 +16,7 @@
  * 8-thread reuse-pool destructor-once sweep (spec L1850).
  */
 
+#include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>

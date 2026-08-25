@@ -2,6 +2,7 @@
 #define MOJITO_SYS_H
 
 #include <stddef.h>
+#include <stdint.h> /* uintptr_t (s2-tls keys) — additive, issue #50 */
 
 /*
  * mojito-sys S1 — frozen C ABI (issue #24): page / VM / stack services.
@@ -163,6 +164,36 @@ unsigned long mjs_thread_self_id(void);
  * SYS-7 divergence: portable floor is 15 chars + NUL, longer -> -ENAMETOOLONG).
  * NULL name is -EINVAL. Non-blocking (SYS-5). */
 int mjs_thread_set_name(const char *name);
+/* --- s2-tls --- */
+
+/* Thread-local storage keys (issue #50): a validated layer over
+ * pthread_key_* with the standard 0 / negative -errno contract. A key is
+ * an opaque nonzero uintptr_t minted by mjs_tls_create; it stays valid in
+ * every thread until mjs_tls_destroy and is NEVER reused, so a stale
+ * handle can never alias a newer key.
+ *
+ * The destructor is an ms_callback (§8): void (*)(void *), exactly the
+ * pthread_key destructor shape, invoked once per thread at thread exit
+ * with that thread's bound value (or not at all when NULL). get() never
+ * allocates (SYS-4); it returns the calling thread's binding, NULL when
+ * unset or the key is invalid. set()/destroy() return -EINVAL for any key
+ * not currently live; out-parameters are untouched on failure. */
+
+/* Mint a TLS key whose per-thread values are passed to `destructor`
+ * (may be NULL) at thread exit. 0 on success with *out_key = new key;
+ * negative errno on failure, *out_key untouched. */
+int mjs_tls_create(ms_callback destructor, uintptr_t *out_key);
+
+/* Calling thread's value for `key`; NULL when unset or key invalid.
+ * Never allocates. */
+void *mjs_tls_get(uintptr_t key);
+
+/* Set the calling thread's value for `key`. -EINVAL for an invalid key. */
+int mjs_tls_set(uintptr_t key, void *value);
+
+/* Delete `key`. -EINVAL if invalid/double-destroyed. A destructor does NOT
+ * run for values still bound at delete time (POSIX semantics). */
+int mjs_tls_destroy(uintptr_t key);
 
 #ifdef __cplusplus
 }
