@@ -35,41 +35,64 @@
 #   EINVAL = 22  (Invalid argument)
 #   EFAULT = 14  (Bad address)
 #   ENOTSUP = 45 (Operation not supported)
-comptime POSIX_ERRNO_CODES: List[Int32] = [2, 13, 35, 12, 4, 22, 14, 45]
-comptime POSIX_ERRNO_NAMES: List[String] = [
-    "ENOENT",
-    "EACCES",
-    "EAGAIN",
-    "ENOMEM",
-    "EINTR",
-    "EINVAL",
-    "EFAULT",
-    "ENOTSUP",
-]
-
-# Domain-id table, index-aligned with `ErrorDomain.value`.
-comptime DOMAIN_CODES: List[Int32] = [0, 1, 2, 3, 4, 5]
-comptime DOMAIN_NAMES: List[String] = [
-    "POSIX",
-    "MACH",
-    "INTERNAL",
-    "WIN32",
-    "WSA",
-    "API",
-]
+def _unpack(v: Int) -> String:
+    # Little-endian packed ASCII: byte 0 is the first character; the string
+    # ends at the first zero byte. Straight-line construction only.
+    var s = String("")
+    var rest = v
+    while rest != 0:
+        s += chr(rest & 0xFF)
+        rest >>= 8
+    return s
 
 
-# Linear scan over a comptime (code, name) table: returns the name for a
-# runtime `code`, or "" when unlisted. This drives the to_string message
-# table off comptime data without a hand-maintained if-chain, per S1.3. Only
-# used on the off-hot-path formatting path, so the materialize cost is fine.
-def lookup[codes: List[Int32], names: List[String]](code: Int32) -> String:
-    var cl = materialize[codes]()
-    var nl = materialize[names]()
-    for i in range(len(cl)):
-        if cl[i] == code:
-            return nl[i]
-    return ""
+# Name tables for to_string(). Names are stored as little-endian ASCII packed
+# into Int constants (e.g. "EINVAL" -> bytes 45 49 56 41 4C -> 0x4C41564E4945)
+# and selected by branching on Ints ONLY.
+#
+# b2 NOTE (issue #29): a String LITERAL that reaches a `raise Error(...)`
+# payload through control flow (branch or loop merge — even via a helper,
+# even cross-module, even @always_inline) SIGSEGVs the compiler when the
+# raising member lives on a (Movable) struct in a module that also lowers
+# @extern bindings (mojito_sys/memory/virtual_memory.mojo). Strings built at
+# RUNTIME from Ints lower cleanly everywhere, so the names travel as Ints and
+# are decoded straight-line here. The comments keep the table readable.
+def errno_name(code: Int32) -> String:
+    var packed = Int(0)
+    if code == 2:
+        packed = 0x544E454F4E45  # "ENOENT"
+    elif code == 13:
+        packed = 0x534543434145  # "EACCES"
+    elif code == 35:
+        packed = 0x4E4941474145  # "EAGAIN"
+    elif code == 12:
+        packed = 0x4D454D4F4E45  # "ENOMEM"
+    elif code == 4:
+        packed = 0x52544E4945  # "EINTR"
+    elif code == 22:
+        packed = 0x4C41564E4945  # "EINVAL"
+    elif code == 14:
+        packed = 0x544C55414645  # "EFAULT"
+    elif code == 45:
+        packed = 0x50555354_4F4E45  # "ENOTSUP"
+    return _unpack(packed)
+
+
+def domain_name(value: Int32) -> String:
+    var packed = Int(0)
+    if value == 0:
+        packed = 0x5849534F50  # "POSIX"
+    elif value == 1:
+        packed = 0x4843414D  # "MACH"
+    elif value == 2:
+        packed = 0x4C414E5245544E49  # "INTERNAL"
+    elif value == 3:
+        packed = 0x32334E4957  # "WIN32"
+    elif value == 4:
+        packed = 0x415357  # "WSA"
+    elif value == 5:
+        packed = 0x495041  # "API"
+    return _unpack(packed)
 
 
 # An error-domain discriminator. The domain is the `value` field (compared
@@ -152,11 +175,34 @@ struct SysError(ImplicitlyCopyable):
     # API; consumers must not parse it.
     def to_string(self) -> String:
         if self.domain == ErrorDomain.POSIX:
-            var name = lookup[POSIX_ERRNO_CODES, POSIX_ERRNO_NAMES](self.code)
+            var name = errno_name(self.code)
             if name != "":
                 return "POSIX(" + name + ") errno " + String(self.code)
             return "POSIX errno " + String(self.code)
-        var dname = lookup[DOMAIN_CODES, DOMAIN_NAMES](self.domain.value)
+        var dname = domain_name(self.domain.value)
         if dname == "":
             dname = "domain" + String(self.domain.value)
         return dname + " code " + String(self.code)
+
+
+# Raise a frozen-contract return code (mjs_* ABI convention: 0 success,
+# negative errno = POSIX errno on failure) as a decoded `Error`.
+#
+# The body is deliberately STRAIGHT-LINE: every String piece is either a
+# literal or built from the Int-packed name table with NO String-valued
+# branch anywhere. b2 SIGSEGVs when a String literal reaches a raise payload
+# through ANY control-flow merge (branch/loop, any module, @always_inline
+# included) while lowering a raising member of a (Movable) struct in a module
+# that also lowers @extern bindings — so consumers on mjs_* ABIs must raise
+# through THIS function instead of hand-rolling `raise Error(err.to_string())`
+# (issue #29, panel H6).
+def raise_errno(rc: Int32) raises:
+    var err = SysError.from_rc(rc)
+    var msg = (
+        "mojito-sys error: POSIX errno "
+        + String(err.code)
+        + " ("
+        + errno_name(err.code)
+        + ")"
+    )
+    raise Error(msg)
