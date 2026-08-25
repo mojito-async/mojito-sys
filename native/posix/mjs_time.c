@@ -20,8 +20,11 @@
  *     (spec §19: "conversion/calibration SHOULD avoid repeated expensive
  *     setup") — one calibration per process, then pure integer scaling.
  *
- * Scaling is overflow-safe for any 64-bit tick count:
- *   t*(n/d) == (t/d)*n + ((t%d)*n)/d, each product < 2^64 when n,d < 2^32.
+ * Scaling identity: t*(n/d) == (t/d)*n + ((t%d)*n)/d. The remainder term
+ * is unconditionally safe: r < d implies r*n < d*n < 2^64 whenever n,d
+ * fit in 32 bits. The quotient product q*n fits precisely when the final
+ * result t*(n/d) is itself representable — the identity never overflows
+ * an answer that fits uint64_t.
  *
  * Linux-portable: no Mach/pthread_once symbols are referenced unless the
  * __APPLE__ path is compiled; no -arch or platform-specific flags needed.

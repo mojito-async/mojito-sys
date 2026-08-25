@@ -15,14 +15,19 @@
 # Storage is plain UInt64 nanoseconds — the same unit the C ABI normalizes
 # to, so no conversion happens anywhere on this side of the boundary.
 #
-# Mojo 1.0.0b2 note: b2 has no struct static methods, so the coarse-unit
-# constructors are MODULE-LEVEL factories (duration_from_secs /
-# duration_from_millis / duration_from_micros) instead of
-# @staticmethod Duration.from_secs — precedent amendment #16.
+# FACTORY SPELLING: the coarse-unit constructors are MODULE-LEVEL functions
+# (duration_from_secs / duration_from_millis / duration_from_micros),
+# matching the batch's other public factories (MonotonicInstant.now()'s
+# alias monotonic_now(), clock_resolution()) for call-site consistency —
+# NOT because of any toolchain limit: b2 supports struct @staticmethod
+# repo-wide (e.g. Protection.read() in memory/virtual_memory.mojo), and
+# where the spec spells a static method we use one.
 
 
-# Saturating UInt64 addition: MAX instead of wrap/trap. Shared with
-# mojito_sys.time.monotonic so instant + Duration uses ONE definition.
+# THE shared saturating UInt64 addition (MAX instead of wrap/trap) for the
+# whole time block: Duration.__add__, MonotonicInstant.__add__ and every
+# future S3 consumer route through this ONE definition so the saturating
+# contract cannot drift between types.
 def saturating_add_ns(a: UInt64, b: UInt64) -> UInt64:
     var cap = ~UInt64(0)
     if a > cap - b:
@@ -30,19 +35,22 @@ def saturating_add_ns(a: UInt64, b: UInt64) -> UInt64:
     return a + b
 
 
+# seconds * 1e9 saturates: beyond MAX/1e9 every value is MAX.
+# Never blocks (SYS-5): pure integer scaling.
 def duration_from_secs(seconds: UInt64) -> Duration:
-    # seconds * 1e9 saturates: beyond MAX/1e9 every value is MAX.
     if seconds > (~UInt64(0)) // UInt64(1000000000):
         return Duration(~UInt64(0))
     return Duration(seconds * UInt64(1000000000))
 
 
+# millis * 1e6 saturates; never blocks (SYS-5).
 def duration_from_millis(millis: UInt64) -> Duration:
     if millis > (~UInt64(0)) // UInt64(1000000):
         return Duration(~UInt64(0))
     return Duration(millis * UInt64(1000000))
 
 
+# micros * 1e3 saturates; never blocks (SYS-5).
 def duration_from_micros(micros: UInt64) -> Duration:
     if micros > (~UInt64(0)) // UInt64(1000):
         return Duration(~UInt64(0))
@@ -64,14 +72,25 @@ struct Duration(ImplicitlyCopyable):
         self.ns = existing.ns
 
     # --- arithmetic (total, never traps, never wraps) ----------------------
-
+    # Never blocks (SYS-5): pure saturating integer arithmetic.
     def __add__(self, rhs: Self) -> Self:
         return Duration(saturating_add_ns(self.ns, rhs.ns))
 
+    # Clamps at zero (inverted pair = "no time left"); never blocks
+    # (SYS-5): pure integer arithmetic.
     def __sub__(self, rhs: Self) -> Self:
         if self.ns <= rhs.ns:
             return Duration(UInt64(0))
         return Duration(self.ns - rhs.ns)
+
+    # Saturating scale by an unsigned multiplier: factor * ns yields MAX
+    # instead of wrapping. THE multiplier primitive for spans — prefer it
+    # over raw `.ns` escapes. Never blocks (SYS-5): pure integer scaling.
+    def scaled(self, factor: UInt64) -> Duration:
+        var umax = ~UInt64(0)
+        if (self.ns != UInt64(0)) and (factor > umax // self.ns):
+            return Duration(umax)
+        return Duration(self.ns * factor)
 
     # --- total-order comparisons -------------------------------------------
 

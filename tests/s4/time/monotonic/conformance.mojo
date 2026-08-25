@@ -10,9 +10,10 @@
 #   4. triangle             — d(a,c) <= d(a,b) + d(b,c) within resolution
 #                             slack;
 #   5. inverted-clamps-zero — DOCUMENTED DEVIATION TEST: duration_since on
-#     an inverted/equal pair clamps to zero instead of underflowing (spec
-#     §38.9 "inverted clamps to 0"; the clamp is the defined behavior, and
-#     this suite fails if it ever changes);
+#     an inverted/equal pair clamps to zero instead of underflowing (the
+#     overflow rule of record: module docblocks in mojito_sys/time per
+#     spec §19; the clamp is the defined behavior, and this suite fails
+#     if it ever changes);
 #   6. saturation           — +Duration saturates at UInt64::MAX for both
 #     MonotonicInstant and Duration; subtraction clamps at zero;
 #   7. mocked-100y          — ~100-year mocked intervals carry exact ns
@@ -93,17 +94,26 @@ def _raw_now_ns() -> UInt64:
 
 
 # Spin until `window_ns` elapsed on the RAW clock, bounded by `budget_ns`.
-# Returns the raw elapsed actually observed, or 0 if the budget blew —
-# callers MUST treat 0 as a harness failure, never as data.
+# Returns the raw elapsed actually observed, or 0 on ANY harness fault —
+# callers MUST treat 0 as a harness failure, never as data. Faults
+# rejected here: an unusable reading (the 0 sentinel libc failures leave)
+# and a BACKWARDS RAW clock (would wrap `now - start` into a gigantic
+# bogus sample). Equal consecutive readings are normal jitter at timer
+# granularity and just keep spinning; the budget is checked BEFORE the
+# window test so the guard is reachable for any window/budget pairing.
 def _spin_raw_window(window_ns: UInt64, budget_ns: UInt64) -> UInt64:
     var start = _raw_now_ns()
+    if start == 0:
+        return 0  # unusable start reading: harness failure, never data
     while True:
         var now = _raw_now_ns()
-        if now - start >= window_ns:
-            return now - start
-        if now - start > budget_ns:
-            return 0
-
+        if (now == 0) or (now < start):
+            return 0  # sentinel or backwards RAW read: reject, never wrap
+        var elapsed = now - start
+        if elapsed > budget_ns:
+            return 0  # budget checked BEFORE the window test
+        if elapsed >= window_ns:
+            return elapsed
 
 def _median3(a: Float64, b: Float64, c: Float64) -> Float64:
     var lo = min(a, min(b, c))
@@ -160,7 +170,21 @@ def main() raises:
     var prog_raw = _spin_raw_window(prog_window, NS_PER_SEC * UInt64(2))
     var p1 = monotonic_now()
     var advanced = p1.duration_since(p0).ns
-    var prog_ok = (prog_raw != 0) and (advanced >= prog_window // UInt64(2))
+    # elapsed() coverage: the normal path re-reads now (a few calls after
+    # p1), so it must land in [advanced, advanced + 1ms]; the clamp branch
+    # pins zero against an unreachable future instant.
+    var e_val = p0.elapsed().ns
+    var elapsed_ok = (e_val >= advanced) and (
+        e_val - advanced <= UInt64(1000000)
+    )
+    elapsed_ok = elapsed_ok and (
+        MonotonicInstant(~UInt64(0)).elapsed().ns == UInt64(0)
+    )
+    var prog_ok = (
+        (prog_raw != 0)
+        and (advanced >= prog_window // UInt64(2))
+        and elapsed_ok
+    )
     if prog_ok:
         print("T4.1 clock-progress:                     PASS")
     else:
@@ -203,9 +227,11 @@ def main() raises:
         failed += 1
 
     # ---- 5. inverted/equal pairs CLAMP TO ZERO (documented behavior) ------
-    # Spec §38.9: "inverted clamps to 0". This is the defined deviation from
-    # unsigned underflow: duration_since NEVER wraps. If these fail, the
-    # documented contract changed — fix the docs or the code, not this test.
+    # Overflow rule of record: the mojito_sys/time module docblocks (spec
+    # §19 requires defined overflow behavior). This is the defined
+    # deviation from unsigned underflow: duration_since NEVER wraps. If
+    # these fail, the documented contract changed — fix the docs or the
+    # code, not this test.
     var inv_earlier = MonotonicInstant(UInt64(1000000000))
     var inv_later = MonotonicInstant(UInt64(400))
     var inv_ok = (inv_later.duration_since(inv_earlier).ns == 0) and (
@@ -229,6 +255,22 @@ def main() raises:
     sat_ok = sat_ok and (
         (tail + Duration(UInt64(93))).ticks == umax - UInt64(7)
     )
+    # instant - Duration SATURATES AT ZERO (never wraps into huge ticks);
+    # exact below the saturation point.
+    sat_ok = sat_ok and (
+        (MonotonicInstant(UInt64(3)) - Duration(UInt64(5))).ticks == UInt64(0)
+    )
+    sat_ok = sat_ok and ((tail - Duration(UInt64(7))).ticks == umax - UInt64(107))
+    # Duration.scaled: exact small products, zero multiplier, and the
+    # saturating threshold (umax//2 + 1) * 2 == umax + 1 -> clamps to MAX.
+    var sc_ok = duration_from_secs(UInt64(2)).scaled(UInt64(3)).ns == UInt64(
+        6000000000
+    )
+    sc_ok = sc_ok and (Duration(UInt64(5)).scaled(UInt64(0)).ns == UInt64(0))
+    sc_ok = sc_ok and (
+        Duration(umax // UInt64(2) + UInt64(1)).scaled(UInt64(2)).ns == umax
+    )
+    sat_ok = sat_ok and sc_ok
     sat_ok = sat_ok and (
         imax.duration_since(MonotonicInstant(umax - UInt64(7))).ns == 7
     )
@@ -256,7 +298,6 @@ def main() raises:
     if mock_ok:
         print("T4.1 mocked-100y-intervals:              PASS")
     else:
-        print("T4.1 mocked-100y-intervals:              FAIL")
         failed += 1
 
     # ---- 8. conversion round-trips ---------------------------------------
@@ -267,6 +308,9 @@ def main() raises:
     # Truncation is part of the documented down-conversion contract.
     rt_ok = rt_ok and (duration_from_millis(UInt64(1500)).as_secs() == UInt64(1))
     rt_ok = rt_ok and (duration_from_secs(umax).ns == umax)  # factory saturates
+    # millis/micros factories saturate at the top of the range too.
+    rt_ok = rt_ok and (duration_from_millis(umax).ns == umax)
+    rt_ok = rt_ok and (duration_from_micros(umax).ns == umax)
     # Instant round-trip: (+d) then duration_since recovers d exactly.
     var ri = monotonic_now()
     var rd = duration_from_millis(UInt64(3))
