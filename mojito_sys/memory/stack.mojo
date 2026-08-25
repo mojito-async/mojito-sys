@@ -10,11 +10,17 @@
 #   guard_low  = first usable byte (base + guard)
 #   top        = highest usable address, 16-byte aligned (initial SP)
 #
+# Accounting SSOT (panel H4): reserved_bytes / committed_bytes derive from
+# the C-RETURNED geometry (out-slots) and C's documented page rounding +
+# clamp rules — never from the raw arguments. Recording raw requests let
+# wrapper bookkeeping drift from the dylib's actual mapping and made grow()
+# fail spuriously on non-page-multiple commits.
+#
 # Ownership: NativeStack owns its reservation; __deinit__ releases it exactly
 # once via mjs_stack_free. Move semantics transfer the reservation.
 #
-# Mojo 1.0.0b2 conventions (matching spike/mojito_spike.mojo and
-# mojito_sys/memory/page.mojo):
+# Mojo 1.0.0b2 conventions (matching spike/mojito_spike.mojo,
+# mojito_sys/memory/page.mojo and mojito_sys/memory/virtual_memory.mojo):
 #   - @extern("<c_symbol>") + abi("C") + `...` body; dylib chosen at link
 #     time (-Xlinker libmojito_sys.dylib).
 #   - UnsafePointer origins must be concrete in extern signatures: every
@@ -22,8 +28,27 @@
 #     at OutSlots below); stack_allocation scratch is fine as long as it
 #     crosses an extern boundary only through that alias.
 #   - def only (fn removed on b2); destructors are def __deinit__(deinit self).
+#   - COMPILER WORKAROUND (b2, verified by bisection, issue #30 fold): a
+#     raising member whose body also lowers an @extern call must keep
+#     EXACTLY ONE raise site, funneled through `raise_errno(rc)`
+#     (mojito_sys/abi/errors, H6) — mirroring virtual_memory.mojo — and
+#     must NOT lower integer division/remainder in that same body (the
+#     sdiv/srem pipeline SIGSEGVs the compiler there; host page sizes are
+#     powers of two, so page rounding uses bit masks instead).
 
 from std.memory import stack_allocation
+
+from mojito_sys.abi.errors import raise_errno
+from mojito_sys.memory.page import page_size
+
+# darwin errno values carried as frozen negative-errno rc's (see the
+# mojito_sys/abi/errors.mojo table); precondition failures share the ABI
+# path's single decoded raise site instead of raising String literals
+# through control-flow merges (b2 crash, issue #29/#30).
+comptime _EINVAL_RC = Int32(-22)
+comptime _ENOMEM_RC = Int32(-12)
+
+
 
 # C `void *` transported as a machine word (Int is 64-bit on LP64). Out-slots
 # are cells holding raw addresses that C reads/writes through.
@@ -72,6 +97,23 @@ struct NativeStack(Movable):
 
     The value is movable; the destructor releases the reservation exactly
     once via mjs_stack_free.
+
+    Blocking behavior (SYS-5): create/grow/__deinit__ each perform
+    synchronous syscalls (mmap/mprotect/munmap; newly committed pages fault
+    in on first touch) and raise on failure via the decoded errno path;
+    no method returns asynchronously. All remaining public defs are pure
+    wrapper reads or direct memory access with no syscall.
+
+    base            : first byte of the reservation (raw address, aligned).
+    guard_low       : first usable byte (base + guard_pages * page_size).
+    top             : highest usable address, 16-byte aligned (initial SP).
+    guard_bytes     : PROT_NONE guard size in bytes (positive page multiple;
+                      validated by the C side, which raises -EINVAL otherwise).
+    reserved_bytes  : total reservation size, from the C-returned geometry
+                      (H4 SSOT).
+    committed_bytes : bytes of the usable span currently RW, page-rounded
+                      and clamped by the C allocator (H4 SSOT); advanced by
+                      grow().
     """
 
     var base: Int
@@ -95,29 +137,46 @@ struct NativeStack(Movable):
         initial_commit_bytes: Int,
         guard_bytes: Int,
     ) raises -> Self:
-        # slots[0]=base  slots[1]=guard_low  slots[2]=top, written by C.
-        var slots = stack_allocation[3, Int]()
+        """Reserve and initially-commit a guarded stack. Raises (decoded
+        errno) on any C-level failure — guard validation, wrap-around,
+        mmap/mprotect errors. Blocking (SYS-5)."""
+        # Three one-word scratch cells written by C (vm-lane reserve
+        # shape); derived multi-cell offsets miscompile here (issue #30).
+        var out_base = stack_allocation[1, Int]()
+        var out_guard_low = stack_allocation[1, Int]()
+        var out_top = stack_allocation[1, Int]()
         var rc = mjs_stack_alloc(
             reserve_bytes,
             initial_commit_bytes,
             guard_bytes,
-            slots,
-            slots + 1,
-            slots + 2,
+            out_base,
+            out_guard_low,
+            out_top,
         )
-        # Copy slot words into locals FIRST: `var ns` below is another stack
-        # allocation and must not alias the out-slot scratch.
-        var slab_base = slots[]
-        var slab_guard_low = (slots + 1)[]
-        var slab_top = (slots + 2)[]
+        # H1: on failure the frozen contract leaves out-slots UNTOUCHED, so
+        # raise the decoded errno BEFORE any field copy or wrapper
+        # construction — a caller can never observe a half-initialized or
+        # poisoned handle (errors.mojo post-#41 path, single raise site).
+        if rc != 0:
+            raise_errno(rc)
         var ns = NativeStack()
-        ns.base = slab_base
-        ns.guard_low = slab_guard_low
-        ns.top = slab_top
+        ns.base = out_base[]
+        ns.guard_low = out_guard_low[]
+        ns.top = out_top[]
         ns.guard_bytes = guard_bytes
-        ns.reserved_bytes = reserve_bytes
-        ns.committed_bytes = initial_commit_bytes
+        # H4: single source of truth — bookkeeping derives from the
+        # C-returned geometry plus C's documented rounding/clamp rules,
+        # never from the raw arguments. Page round-up is inlined as a
+        # power-of-two bit mask (module-head workaround note: no called
+        # rounding helper inside this raising ABI-calling member).
+        var ps = page_size()
+        ns.reserved_bytes = ns.top - ns.base
+        var committed_req = (initial_commit_bytes + ps - 1) & ~(ps - 1)
+        ns.committed_bytes = min(
+            committed_req, ns.top - ns.guard_low,
+        )
         return ns^
+
     def __moveinit__(mut self, mut existing: Self):
         """Transfer the reservation: steal every field and null the source so
         the moved-from value's destructor releases nothing."""
@@ -134,6 +193,9 @@ struct NativeStack(Movable):
         existing.reserved_bytes = 0
         existing.committed_bytes = 0
 
+    # Releases the reservation wholesale (munmap). Blocking (SYS-5). The
+    # pre-check keeps wrapper-level idempotency: moved-from values hold no
+    # reservation, and the C side treats double-free as -EINVAL (H2).
     def __deinit__(deinit self):
         if self.base != 0:
             var slot = stack_allocation[1, Int]()
@@ -180,7 +242,8 @@ struct NativeStack(Movable):
     def write_at(self, addr: Int, value: UInt8) -> Bool:
         """Write one byte in [guard_low, top). False if outside the usable
         range (the guard region is never written from Mojo; the guard fault
-        proof runs in a forked child process via the C probe)."""
+        proof runs in a forked child process via the C probe). First touch
+        of a committed page faults it in synchronously."""
         if addr < self.guard_low or addr >= self.top:
             return False
         var p = UnsafePointer[UInt8, MutAnyOrigin](unsafe_from_address=addr)
@@ -188,6 +251,8 @@ struct NativeStack(Movable):
         return True
 
     def read_byte(self, addr: Int) -> UInt8:
+        """Read one byte from the usable span. Non-syscall; may fault a
+        committed page in on first touch."""
         var p = UnsafePointer[UInt8, MutAnyOrigin](unsafe_from_address=addr)
         return p[]
 
@@ -199,51 +264,40 @@ struct NativeStack(Movable):
         S1 keeps the C ABI frozen: growth is not a new C symbol — grow()
         reuses mjs_vm_commit (vm lane, issue #29), which flips a
         page-aligned, already-mapped PROT_NONE span to RW anywhere.
+        Raises (decoded errno) on a non-page-multiple request (SHOULD 1:
+        explicit early gate, not a downstream mprotect EINVAL), a negative
+        request, a request beyond the reserved span, or an mprotect failure.
+        Blocking (SYS-5).
         """
         if additional_bytes == 0:
             return
-        var remaining = (self.top - self.guard_low) - self.committed_bytes
-        NativeStack._check_grow(
-            additional_bytes < 0, additional_bytes > remaining,
-            additional_bytes, remaining,
-        )
-        var span_start = self.top - self.committed_bytes - additional_bytes
-        var rc = NativeStack._commit_raw(span_start, additional_bytes)
-        NativeStack._commit_raise(rc)
-        self.committed_bytes += additional_bytes
-
-
-
-    @staticmethod
-    def _check_grow(
-        negative: Bool,
-        beyond: Bool,
-        additional: Int,
-        remaining: Int,
-    ) raises:
-        """Raise-only bounds gate; kept extern-free (see _commit_raise note)."""
-        if negative:
-            raise Error("NativeStack.grow: negative additional_bytes")
-        if beyond:
-            raise Error(
-                "NativeStack.grow: beyond reserved span (need "
-                + String(additional) + ", have "
-                + String(remaining) + " bytes left)",
+        # COMPILER WORKAROUND (b2, mirrors virtual_memory.mojo): this
+        # ABI-calling raising member has EXACTLY ONE raise site at the tail;
+        # precondition violations set an errno rc instead of raising inline,
+        # so no String literal ever reaches a payload through a merge.
+        var ps = page_size()
+        var rc = Int32(0)
+        if additional_bytes < 0:
+            rc = _EINVAL_RC
+        if rc == 0 and (additional_bytes & (ps - 1)) != 0:
+            rc = _EINVAL_RC
+        if rc == 0:
+            var remaining = (self.top - self.guard_low) - self.committed_bytes
+            if additional_bytes > remaining:
+                rc = _ENOMEM_RC
+        if rc == 0:
+            var span_start = (
+                self.top - self.committed_bytes - additional_bytes
             )
+            rc = NativeStack._commit_raw(span_start, additional_bytes)
+        if rc != 0:
+            raise_errno(rc)
+        self.committed_bytes += additional_bytes
 
     @staticmethod
     def _commit_raw(span_start: Int, length: Int) -> Int32:
-        """Extern-only commit helper; the raise lives in _commit_raise
-        because the b2 compiler crashes when a single non-static function
-        body both calls an extern and raises."""
+        """Extern-only commit helper; grow()'s single raise site consumes
+        its rc (b2: an ABI-calling raising member keeps exactly one raise)."""
         var slot = stack_allocation[1, Int]()
         slot[] = span_start
         return mjs_vm_commit(slot, length)
-
-    @staticmethod
-    def _commit_raise(rc: Int32) raises:
-        if rc != 0:
-            raise Error(
-                "NativeStack.grow: mjs_vm_commit rc=" + String(rc)
-                + " (vm-lane service not merged yet, issue #29)",
-            )
