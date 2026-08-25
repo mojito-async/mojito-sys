@@ -81,10 +81,12 @@ else
         run_check t1-t7      make test
         run_check t8-t14     ./tests/spike/run_t8_t14.sh
         run_check bench      make bench
+        run_check s1-tests    make test-s1
     else
         say "== fast suite (selftest, T1-T7) — fast=1"
         run_check selftest   make selftest
         run_check t1-t7      make test
+        run_check s1-tests    make test-s1
     fi
 fi
 

@@ -1,0 +1,10 @@
+# Expected exported symbols of libmojito_sys.dylib (packaging conformance,
+# panel H2). run.sh diffs this list against `nm -gU` of the dylib in BOTH
+# directions:
+#   - a declared-but-unexported symbol here = red (consumer link breakage),
+#   - an unexpected extra export = red (silent ABI surface growth).
+#
+# Policy: each landing S1 lane APPENDS its entry points to this file in the
+# same commit that adds the implementation, keeping the check exact.
+mjs_page_size
+mjs_abi_version
