@@ -29,7 +29,7 @@
 from std.memory import stack_allocation
 
 comptime BytePtr = UnsafePointer[Byte, MutAnyOrigin]
-comptime Out = UnsafePointer[Int, MutUntrackedOrigin]
+comptime Out = UnsafePointer[Int, MutAnyOrigin]
 comptime Word = UnsafePointer[Int, MutAnyOrigin]
 
 comptime RESERVE_BYTES = 1 << 22        # 4 MiB
@@ -52,8 +52,11 @@ def _mjs_stack_alloc(
     ...
 
 
+# Frozen ABI (native/include/mojito_sys.h): int mjs_vm_commit(unsigned char
+# **addr, size_t length). addr is a POINTER TO a cell holding the span start;
+# on full success C advances the cell past the committed run.
 @extern("mjs_vm_commit")
-def _mjs_vm_commit(addr: Int, bytes: Int) abi("C") -> Int32:
+def _mjs_vm_commit(addr_cell: Out, length: Int) abi("C") -> Int32:
     ...
 
 
@@ -68,7 +71,9 @@ def _c_exit(code: Int32) abi("C"):
 
 
 def main():
-    var slots = stack_allocation[3, Int]()
+    # slots[0..2] = base/guard_low/top out-slots; slots[3] = mjs_vm_commit
+    # address cell (C reads and advances *addr through it).
+    var slots = stack_allocation[4, Int]()
     var rc = _mjs_stack_alloc(
         RESERVE_BYTES, INIT_COMMIT, GUARD, slots, slots + 1, slots + 2
     )
@@ -109,10 +114,19 @@ def main():
             print("S1-NOMOVE FAIL: growth would exceed reservation at step ", step)
             _mjs_stack_free(slots)
             _c_exit(1)
-        var grc = _mjs_vm_commit(guard_low + committed, GROW_QUANTUM)
+        (slots + 3)[] = guard_low + committed
+        var grc = _mjs_vm_commit(slots + 3, GROW_QUANTUM)
         committed += GROW_QUANTUM
         if grc != 0:
             print("S1-NOMOVE FAIL: mjs_vm_commit rc=", grc, " at step ", step)
+            _mjs_stack_free(slots)
+            _c_exit(1)
+        # Frozen ABI contract: on full success C advances the cell exactly
+        # past the committed run; it must never move existing frames.
+        if (slots + 3)[] != guard_low + committed:
+            print(
+                "S1-NOMOVE FAIL: commit did not advance addr cell at step ", step
+            )
             _mjs_stack_free(slots)
             _c_exit(1)
 

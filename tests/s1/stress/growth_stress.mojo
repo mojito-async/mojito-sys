@@ -16,14 +16,14 @@
 from std.memory import stack_allocation
 
 comptime BytePtr = UnsafePointer[Byte, MutAnyOrigin]
-comptime Out = UnsafePointer[Int, MutUntrackedOrigin]
+comptime Out = UnsafePointer[Int, MutAnyOrigin]
 comptime Word = UnsafePointer[Int, MutAnyOrigin]
 
-comptime RESERVE_BYTES = 1 << 21        # 2 MiB
+comptime RESERVE_BYTES = 1 << 23        # 8 MiB: INIT_COMMIT + CYCLES pages
 comptime INIT_COMMIT = 16 * 1024
 comptime GUARD = 16 * 1024              # 1 page
 comptime CYCLES = 300
-comptime QUANTUM = 4 * 1024
+comptime QUANTUM = 0                   # replaced at run time: one host page
 
 
 @extern("mjs_stack_alloc")
@@ -38,13 +38,16 @@ def _mjs_stack_alloc(
     ...
 
 
+# Frozen ABI (native/include/mojito_sys.h): int mjs_vm_commit(unsigned char
+# **addr, size_t length). addr is a POINTER TO a cell holding the span start;
+# on full success C advances the cell past the committed run.
 @extern("mjs_vm_commit")
-def _mjs_vm_commit(addr: Int, bytes: Int) abi("C") -> Int32:
+def _mjs_vm_commit(addr_cell: Out, length: Int) abi("C") -> Int32:
     ...
 
 
 @extern("mjs_stack_free")
-def _mjs_stack_free(base_slot: Out) abi("C"):
+def _mjs_stack_free(base_slot: Out) abi("C") -> Int32:
     ...
 
 
@@ -58,8 +61,15 @@ def _c_exit(code: Int32) abi("C"):
     ...
 
 
+@extern("mjs_page_size")
+def _mjs_page_size() abi("C") -> Int32:
+    ...
+
+
 def main():
-    var slots = stack_allocation[3, Int]()
+    # slots[0..2] = base/guard_low/top out-slots; slots[3] = mjs_vm_commit
+    # address cell (C reads and advances *addr through it).
+    var slots = stack_allocation[4, Int]()
     var rc = _mjs_stack_alloc(
         RESERVE_BYTES, INIT_COMMIT, GUARD, slots, slots + 1, slots + 2
     )
@@ -71,17 +81,34 @@ def main():
     var guard_low: Int = (slots + 1)[]
     var top: Int = (slots + 2)[]
 
+    # Growth quantum = one host page (16384 on this toolchain): every commit
+    # address must stay page-aligned or mprotect inside mjs_vm_commit fails
+    # with EINVAL on macOS arm64.
+    var quantum = Int(_mjs_page_size())
+    if quantum <= 0 or (quantum & (quantum - 1)) != 0:
+        print("S1-GROWTH FAIL: mjs_page_size()=", quantum)
+        _c_exit(1)
+
     var committed = INIT_COMMIT
     var prev = 0
     var step = 0
     while step < CYCLES:
-        if (guard_low + committed + QUANTUM) > top:
+        if (guard_low + committed + quantum) > top:
             print("S1-GROWTH FAIL: cycle ", step, " would exceed reservation")
             _c_exit(1)
-        var grc = _mjs_vm_commit(guard_low + committed, QUANTUM)
-        committed += QUANTUM
+        (slots + 3)[] = guard_low + committed
+        var grc = _mjs_vm_commit(slots + 3, quantum)
+        committed += quantum
         if grc != 0:
             print("S1-GROWTH FAIL: mjs_vm_commit rc=", grc, " at cycle ", step)
+            _c_exit(1)
+        # Frozen ABI contract: on full success C advances the cell exactly
+        # past the committed run.
+        if (slots + 3)[] != guard_low + committed:
+            print(
+                "S1-GROWTH FAIL: commit did not advance addr cell at cycle ",
+                step,
+            )
             _c_exit(1)
 
         # Non-moving: low (guard_low) and high (top) boundaries fixed at
@@ -96,7 +123,7 @@ def main():
         prev = committed
         step += 1
 
-    if committed != INIT_COMMIT + CYCLES * QUANTUM:
+    if committed != INIT_COMMIT + CYCLES * quantum:
         print("S1-GROWTH FAIL: final committed mismatch ", committed)
         _c_exit(1)
 
