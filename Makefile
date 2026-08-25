@@ -38,7 +38,7 @@ LIB_OBJS     := $(filter-out $(BUILD)/selftest.o,$(OBJS))
 SELFTEST_BIN := $(BUILD)/selftest
 
 .DELETE_ON_ERROR:
-.PHONY: all selftest test bench test-s1 clean
+.PHONY: all selftest test bench test-s1 test-s2 clean
 
 all: $(DYLIB) $(SELFTEST_BIN) $(DYLIB_SYS)
 
@@ -83,6 +83,8 @@ bench: $(DYLIB)
 
 test-s1: $(DYLIB_SYS)
 	MOJO=$(MOJO) ./tests/s1/run.sh
+test-s2: $(DYLIB_SYS)
+	MOJO=$(MOJO) ./tests/s2/native/run.sh
 
 -include $(SYS_DEPS)
 clean:
