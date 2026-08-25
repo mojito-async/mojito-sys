@@ -1,95 +1,97 @@
-# S1-STRESS-NOMOVE — a grown stack must not move (issue #31).
+# S1-STRESS-NOMOVE-TEST — a grown stack must not move (issue #31).
 #
 # Spec 10.2: live stack frames MUST never be moved. A stack grows by
 # COMMITTING more of its own already-reserved span (mjs_vm_commit), never by
-# relocating existing frames. This driver proves the non-moving invariant
-# under repeated growth.
+# relocating existing frames. Growth follows the declared production model
+# of NativeStack.grow (issue #30): the committed span is [top - committed,
+# top) and extends DOWNWARD; mjs_vm_commit's cursor advances upward within
+# the reservation. TODO(issue #30): re-drive the grow path through the
+# public NativeStack.grow wrapper once mojito_sys.memory.stack lands on
+# main; until then this mirrors its arithmetic byte-for-byte.
 #
-# Layout (align at rebase if the native stack lane exposes geometry
-# differently — see t_guard_stress.c):
-#   [base, base+GUARD)            : PROT_NONE guard (FIRST reserve bytes)
-#   [guard_low = base+GUARD, top] : usable region; top = out_top (highest
-#                                   usable, 16-aligned)
+# Layout (production, native/posix/mjs_stack.c):
+#   [base, base+guard)            : PROT_NONE guard (first guard bytes)
+#   [guard_low = base+guard, top] : usable region; top = highest usable,
+#                                   16-aligned; committed span at TOP.
 #
 # Procedure:
-#   1. mjs_stack_alloc(4 MiB reserve, 16 KiB commit, 1 page guard);
-#      record base / guard_low / top.
-#   2. Write SENTINELS descending 16-byte-stride Int frame stand-ins from
-#      top downward, recording each address.
-#   3. GROW_ROUNDS x mjs_vm_commit(GROW_QUANTUM), extending the committed
-#      window by committing more of the same reservation.
+#   1. mjs_stack_alloc(4 MiB usable, 16 KiB commit request, 1 page guard);
+#      record base / guard_low / top (geometry derived from mjs_page_size).
+#   2. Write SENTINELS descending 16-byte-stride frame stand-ins from top
+#      downward, recording each address.
+#   3. GROW_ROUNDS x downward commit of one page: first-touch zero-fill
+#      check on each fresh page BEFORE writing, then a marker write that
+#      must persist across later rounds.
 #   4. At every step re-read every sentinel at its recorded address and
 #      require bit-identical values — growth must not relocate frame data.
-#   5. Require committed size strictly grows monotonically, and the recorded
-#      boundary addresses remain the allocation-time values.
-#
-# Until the build/vm/stack lanes land this driver cannot link and fails red
-# (issue #31 dependence).
+#   5. Negative controls pinning the oracle's blind spots:
+#      a) relocation blind spot — MADV_FREE laziness can keep old bytes
+#         READABLE after backing is dropped, so sentinel re-reads alone
+#         could pass a content-preserving relocation. The driver decommits
+#         a fresh page via its OWN conforming mjs_vm_decommit and requires
+#         stress_decommit_verdict to report a contained fault; a readable
+#         decommitted page means the oracle is blind and the suite says so.
+#      b) over-commit blind spot — reading the page just BELOW the initial
+#         committed window must fault; an allocator that pre-commits the
+#         whole usable span is caught before any growth round runs.
 
 from std.memory import stack_allocation
 
-comptime BytePtr = UnsafePointer[Byte, MutAnyOrigin]
-comptime Out = UnsafePointer[Int, MutAnyOrigin]
-comptime Word = UnsafePointer[Int, MutAnyOrigin]
+from stress_externs import (
+    c_exit,
+    mjs_page_size,
+    mjs_stack_alloc,
+    mjs_stack_free,
+    mjs_vm_commit,
+    mjs_vm_decommit,
+    stress_decommit_verdict,
+)
 
-comptime RESERVE_BYTES = 1 << 22        # 4 MiB
-comptime INIT_COMMIT = 16 * 1024
-comptime GUARD = 16 * 1024              # 1 page (16384 on arm64)
+comptime RESERVE_BYTES = 1 << 22        # usable span: 4 MiB (page multiple)
+comptime INIT_COMMIT_REQ = 16 * 1024    # request; C rounds up to pages
 comptime GROW_ROUNDS = 20
-comptime GROW_QUANTUM = 32 * 1024
 comptime SENTINELS = 12
 
 
-@extern("mjs_stack_alloc")
-def _mjs_stack_alloc(
-    reserve_bytes: Int,
-    initial_commit_bytes: Int,
-    guard_bytes: Int,
-    out_base: Out,
-    out_guard_low: Out,
-    out_top: Out,
-) abi("C") -> Int32:
-    ...
-
-
-# Frozen ABI (native/include/mojito_sys.h): int mjs_vm_commit(unsigned char
-# **addr, size_t length). addr is a POINTER TO a cell holding the span start;
-# on full success C advances the cell past the committed run.
-@extern("mjs_vm_commit")
-def _mjs_vm_commit(addr_cell: Out, length: Int) abi("C") -> Int32:
-    ...
-
-
-@extern("mjs_stack_free")
-def _mjs_stack_free(base_slot: Out) abi("C"):
-    ...
-
-
-@extern("exit")
-def _c_exit(code: Int32) abi("C"):
-    ...
+def round_up_to_page(n: Int, ps: Int) -> Int:
+    return (n + ps - 1) // ps * ps
 
 
 def main():
-    # slots[0..2] = base/guard_low/top out-slots; slots[3] = mjs_vm_commit
-    # address cell (C reads and advances *addr through it).
-    var slots = stack_allocation[4, Int]()
-    var rc = _mjs_stack_alloc(
-        RESERVE_BYTES, INIT_COMMIT, GUARD, slots, slots + 1, slots + 2
+    var ps = Int(mjs_page_size())
+    if ps <= 0 or (ps & (ps - 1)) != 0:
+        print("S1-NOMOVE FAIL: mjs_page_size()=", ps)
+        c_exit(1)
+
+    var quantum = ps                       # one host page per round
+    var guard_bytes = ps
+
+    # slots[0..2] = base/guard_low/top out-slots; slots[3] = commit cursor
+    # cell (C reads and advances *addr through it); slots[4] = decommit
+    # cursor cell for the negative control.
+    var slots = stack_allocation[5, Int]()
+    var rc = mjs_stack_alloc(
+        RESERVE_BYTES, INIT_COMMIT_REQ, guard_bytes, slots, slots + 1, slots + 2
     )
     if rc != 0 or slots[] == 0 or (slots + 1)[] == 0 or (slots + 2)[] == 0:
         print("S1-NOMOVE FAIL: mjs_stack_alloc rc=", rc)
-        _c_exit(1)
+        c_exit(1)
 
     var base: Int = slots[]
     var guard_low: Int = (slots + 1)[]
     var top: Int = (slots + 2)[]
-    if (base + GUARD) != guard_low:
-        print("S1-NOMOVE FAIL: guard_low != base+GUARD")
-        _mjs_stack_free(slots)
-        _c_exit(1)
+    if (base + guard_bytes) != guard_low:
+        print("S1-NOMOVE FAIL: guard_low != base+guard")
+        mjs_stack_free(slots)
+        c_exit(1)
 
     # Record each sentinel address (computed once) and expected value.
+    # Sentinels live inside the initially committed top span.
+    var committed = round_up_to_page(INIT_COMMIT_REQ, ps)
+    if SENTINELS * 16 > committed:
+        print("S1-NOMOVE FAIL: sentinels exceed initial commit ", committed)
+        mjs_stack_free(slots)
+        c_exit(1)
     var addrs = stack_allocation[SENTINELS, Int]()
     var vals = stack_allocation[SENTINELS, Int]()
     var k = 0
@@ -98,61 +100,136 @@ def main():
         addrs[k] = a
         var expected = 0x5A5A0000 + k
         vals[k] = expected
-        var pp = Word(unsafe_from_address=a)
+        var pp = UnsafePointer[Int, MutAnyOrigin](unsafe_from_address=a)
         pp[] = expected
-        var got = pp[]
-        if got != expected:
+        if pp[] != expected:
             print("S1-NOMOVE FAIL: initial sentinel ", k, " not stable")
-            _mjs_stack_free(slots)
-            _c_exit(1)
+            mjs_stack_free(slots)
+            c_exit(1)
         k += 1
 
-    var committed = INIT_COMMIT
+    # Over-commit control (review mutant B): the span just BELOW the
+    # initial committed window must still be reserved-but-uncommitted.
+    # Reading it must fault in the fork child; a child that survives means
+    # the allocator over-committed the reservation and the oracle would
+    var below_span = top - committed - 1
+    var oc = stress_decommit_verdict(below_span)
+    if oc != 0:
+        print(
+            "S1-NOMOVE FAIL: over-commit control verdict=", oc,
+            " — page below initial commit already accessible",
+        )
+        mjs_stack_free(slots)
+        c_exit(1)
+
+    # Fresh-page marker addresses/values, one per growth round.
+    var marks = stack_allocation[GROW_ROUNDS, Int]()
+
     var step = 0
     while step < GROW_ROUNDS:
-        if (guard_low + committed + GROW_QUANTUM) > top:
-            print("S1-NOMOVE FAIL: growth would exceed reservation at step ", step)
-            _mjs_stack_free(slots)
-            _c_exit(1)
-        (slots + 3)[] = guard_low + committed
-        var grc = _mjs_vm_commit(slots + 3, GROW_QUANTUM)
-        committed += GROW_QUANTUM
+        # Production NativeStack.grow arithmetic (issue #30): extend DOWNWARD.
+        var span_start = top - committed - quantum
+        var cell = (slots + 3)
+        cell[] = span_start
+        var grc = mjs_vm_commit(cell, quantum)
         if grc != 0:
             print("S1-NOMOVE FAIL: mjs_vm_commit rc=", grc, " at step ", step)
-            _mjs_stack_free(slots)
-            _c_exit(1)
-        # Frozen ABI contract: on full success C advances the cell exactly
-        # past the committed run; it must never move existing frames.
-        if (slots + 3)[] != guard_low + committed:
-            print(
-                "S1-NOMOVE FAIL: commit did not advance addr cell at step ", step
+            mjs_stack_free(slots)
+            c_exit(1)
+        if cell[] != top - committed:
+            print("S1-NOMOVE FAIL: cursor did not advance as declared at step ",
+                step,
             )
-            _mjs_stack_free(slots)
-            _c_exit(1)
+            mjs_stack_free(slots)
+            c_exit(1)
 
-        # Non-moving contract: every frame stand-in still holds its value.
+        # First touch: fresh anonymous commit reads zero-fill before write.
+        var fp = UnsafePointer[Byte, MutAnyOrigin](unsafe_from_address=span_start)
+        if Int(fp[]) != 0:
+            print(
+                "S1-NOMOVE FAIL: fresh commit not zero-fill at step ", step
+            )
+            mjs_stack_free(slots)
+            c_exit(1)
+        fp[] = Byte((step % 251) + 1)
+        marks[step] = span_start
+        if step > 0:
+            var prev = UnsafePointer[Byte, MutAnyOrigin](
+                unsafe_from_address=marks[step - 1]
+            )
+            if Int(prev[]) != ((step - 1) % 251) + 1:
+                print("S1-NOMOVE FAIL: earlier marker corrupted at step ", step)
+                mjs_stack_free(slots)
+                c_exit(1)
+
+        committed += quantum
+        # Non-moving contract: every frame stand-in still holds its value;
+        # boundaries remain the allocation-time addresses.
         var j = 0
         while j < SENTINELS:
-            if Word(unsafe_from_address=addrs[j])[] != vals[j]:
-                print("S1-NOMOVE FAIL: sentinel index ", j, " moved/corrupted at step ", step)
-                _mjs_stack_free(slots)
-                _c_exit(1)
+            if (
+                UnsafePointer[Int, MutAnyOrigin](
+                    unsafe_from_address=addrs[j]
+                )[]
+                != vals[j]
+            ):
+                print(
+                    "S1-NOMOVE FAIL: sentinel index ", j,
+                    " moved/corrupted at step ", step,
+                )
+                mjs_stack_free(slots)
+                c_exit(1)
             j += 1
+        if guard_low != (slots + 1)[] or top != (slots + 2)[]:
+            print("S1-NOMOVE FAIL: boundary moved at step ", step)
+            mjs_stack_free(slots)
+            c_exit(1)
         step += 1
 
-    var expect = INIT_COMMIT + GROW_ROUNDS * GROW_QUANTUM
-    if committed != expect:
-        print("S1-NOMOVE FAIL: committed not monotonic (", committed, " != ", expect, ")")
-        _mjs_stack_free(slots)
-        _c_exit(1)
+    if committed != round_up_to_page(INIT_COMMIT_REQ, ps) + GROW_ROUNDS * quantum:
+        print("S1-NOMOVE FAIL: committed bookkeeping mismatch (", committed, ")")
+        mjs_stack_free(slots)
+        c_exit(1)
+
+    # Negative control: the project's own conforming decommit must flip the
+    # oracle loud — reading a decommitted page faults in the fork child, it
+    # must NOT silently return stale (MADV_FREE-lazy) bytes.
+    var ctrl_cell = (slots + 4)
+    ctrl_cell[] = marks[GROW_ROUNDS - 1]
+    var drc = mjs_vm_decommit(ctrl_cell, quantum)
+    if drc != 0 or ctrl_cell[] != marks[GROW_ROUNDS - 1] + quantum:
+        print("S1-NOMOVE FAIL: mjs_vm_decommit rc=", drc)
+        mjs_stack_free(slots)
+        c_exit(1)
+    var verdict = stress_decommit_verdict(marks[GROW_ROUNDS - 1])
+    if verdict != 0:
+        print(
+            "S1-NOMOVE FAIL: decommit negative-control verdict=", verdict,
+            " — oracle blind: decommitted page still readable",
+        )
+        mjs_stack_free(slots)
+        c_exit(1)
+
+    # Decommit must not disturb neighbours: sentinels and surviving markers
+    # are still bit-intact afterwards.
+    k = 0
+    while k < SENTINELS:
+        if (
+            UnsafePointer[Int, MutAnyOrigin](unsafe_from_address=addrs[k])[]
+            != vals[k]
+        ):
+            print("S1-NOMOVE FAIL: post-decommit sentinel drift")
+            mjs_stack_free(slots)
+            c_exit(1)
+        k += 1
 
     print(
-        "S1-NOMOVE PASS: base/guard_low/top stable across ",
+        "S1-NOMOVE PASS: boundaries stable across ",
         GROW_ROUNDS,
-        " growths; ",
+        " downward growths; ",
         SENTINELS,
-        " 16-byte-aligned sentinels intact; committed ",
-        committed,
-        " monotonic",
+        " sentinels intact; first-touch zero-fill held; "
+        + "decommit control faults loud",
     )
-    _mjs_stack_free(slots)
+    mjs_stack_free(slots)
+    print("RESULT: S1-NOMOVE green")
