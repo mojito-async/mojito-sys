@@ -14,3 +14,5 @@ mjs_vm_commit
 mjs_vm_decommit
 mjs_vm_protect
 mjs_vm_release
+mjs_stack_alloc
+mjs_stack_free
