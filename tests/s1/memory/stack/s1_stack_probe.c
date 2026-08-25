@@ -9,7 +9,7 @@
  * Exported:
  *   int s1_stack_probe_init(void);     0 = all required symbols resolved
  *   int s1_guard_probe_run(void);      verdict code (0 = pass)
- *
+ *   int s1_contract_probe_run(void);   # failed checks (0 = pass)
  * Verdict codes from s1_guard_probe_run:
  *   0  controlled fault in child + healthy top-of-stack write in parent
  *   2  child exited normally (guard absent or writable => silent corruption)
@@ -31,6 +31,7 @@
  */
 
 #include <dlfcn.h>
+#include <errno.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -111,4 +112,65 @@ int s1_guard_probe_run(void)
     if (WIFEXITED(st))
         return 2;
     return 3;
+}
+
+/* Contract probe (panel H1/H2/H3 regressions, run against the dylib ABI):
+ * returns the number of FAILED checks; 0 = all conform. */
+int s1_contract_probe_run(void)
+{
+    int bad = 0;
+    void *b, *g;
+    size_t t;
+    int rc;
+
+    /* H2: guard_bytes == 0 must be -EINVAL (no silent one-page coercion). */
+    if (p_alloc(256 * 1024, 16 * 1024, 0, &b, &g, &t) != -EINVAL)
+        bad++;
+
+    /* H2: non-page-multiple guard must be -EINVAL (no silent round-up). */
+    if (p_alloc(256 * 1024, 16 * 1024, 1000, &b, &g, &t) != -EINVAL)
+        bad++;
+
+    /* Frozen contract: out-slots untouched on failure. */
+    b = (void *)1;
+    g = (void *)1;
+    t = 1;
+    rc = p_alloc(256 * 1024, 16 * 1024, 0, &b, &g, &t);
+    if (rc != -EINVAL || b != (void *)1 || g != (void *)1 || t != 1)
+        bad++;
+
+    /* H3: rounding wrap-around via reserve must fail, not "succeed"
+     * with a tiny guard-less mapping. */
+    rc = p_alloc(SIZE_MAX, 0, 16384, &b, &g, &t);
+    if (rc != -EINVAL && rc != -ENOMEM)
+        bad++;
+
+    /* H3: rounding wrap-around via initial_commit. */
+    rc = p_alloc(256 * 1024, SIZE_MAX, 16384, &b, &g, &t);
+    if (rc != -EINVAL && rc != -ENOMEM)
+        bad++;
+
+    /* H3: rounding wrap-around via guard_bytes near SIZE_MAX. */
+    rc = p_alloc(16384, 0, SIZE_MAX - 4095, &b, &g, &t);
+    if (rc != -EINVAL && rc != -ENOMEM)
+        bad++;
+
+    /* H2: NULL slot pointer and double-free are -EINVAL errors. */
+    if (p_free(NULL) != -EINVAL)
+        bad++;
+    b = NULL;
+    if (p_free(&b) != -EINVAL)
+        bad++;
+
+    /* Success path unchanged: alloc -> free -> double-free(-EINVAL). */
+    rc = p_alloc(256 * 1024, 16 * 1024, 16384, &b, &g, &t);
+    if (rc != 0 || b == NULL) {
+        bad++;
+    } else {
+        if (p_free(&b) != 0 || b != NULL)
+            bad++;
+        if (p_free(&b) != -EINVAL)
+            bad++;
+    }
+    return bad;
 }

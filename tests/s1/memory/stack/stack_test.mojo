@@ -14,10 +14,11 @@
 #      movement; descending stack writes exercise the deeper committed
 #      span without ever touching the guard.
 #
-# Green requires the merged libmojito_sys.dylib with mjs_stack_alloc/free
-# (stack lane) and mjs_vm_commit (vm lane, PR #41); until the vm lane merges
-# into main, verify growth against a throwaway merge carrying
-# native/posix/mjs_vm.c (never commit a copy of another lane's file).
+# Green requires the packaged libmojito_sys.dylib with mjs_stack_alloc/free
+# (stack lane) and mjs_vm_commit (vm lane; merged to main via PR #41).
+#
+# Regression sections: 6 = C ABI contract (H1/H2/H3), 7 = accounting SSOT
+# and early grow precondition (H4/SHOULD-1).
 
 from mojito_sys.memory.stack import NativeStack
 
@@ -31,6 +32,11 @@ def _probe_init() abi("C") -> Int32:
 
 @extern("s1_guard_probe_run")
 def _guard_probe_run() abi("C") -> Int32:
+    ...
+
+
+@extern("s1_contract_probe_run")
+def _contract_probe_run() abi("C") -> Int32:
     ...
 
 
@@ -70,9 +76,6 @@ def main() raises:
 
     # 1. create + geometry -------------------------------------------------
     var st = NativeStack.create(RESERVE, INITIAL_COMMIT, GUARD)
-    if not st.is_live():
-        print("create FAIL: stack not live after create")
-        return
     failures += check("create live", st.is_live())
     failures += check(
         "geometry base < guard_low <= top",
@@ -137,9 +140,6 @@ def main() raises:
 
     # 4. growth: 100x commit, addresses stable ------------------------------
     var st2 = NativeStack.create(RESERVE_BIG, INITIAL_COMMIT, GUARD)
-    if not st2.is_live():
-        print("growth FAIL: big stack not live")
-        return
     var gb = st2.base_address()
     var gg = st2.guard_low_address()
     var gt = st2.top_address()
@@ -206,6 +206,94 @@ def main() raises:
         "op1 slot values unaffected by later op",
         ra.guard_low_address() == ra.base_address() + GUARD
         and ra.top_address() == ra.base_address() + GUARD + RESERVE,
+    )
+
+
+    # 6. contract regressions (panel H1/H2/H3) -----------------------------
+    # create() must RAISE on C-level failure (H1): guard validation and
+    # wrap-around are now -EINVAL at the ABI, surfaced as decoded raises.
+
+    var caught = False
+    try:
+        NativeStack.create(RESERVE, INITIAL_COMMIT, 0)
+    except e:
+        caught = True
+    failures += check("create(guard=0) raises EINVAL (H2)", caught)
+
+    caught = False
+    try:
+        # 4096 is a page multiple on 4K hosts but NOT on this 16K host:
+        # non-page-multiple guard must raise, not silently round up.
+        NativeStack.create(RESERVE, INITIAL_COMMIT, 4096)
+    except e:
+        caught = True
+    failures += check("create(guard=1000..non-multiple) raises EINVAL", caught)
+
+    caught = False
+    try:
+        # H3 wrap boundary: reserve near Int max wraps the C rounding
+        # arithmetic; must raise, not return a tiny guard-less stack.
+        NativeStack.create(9223372036854775807, INITIAL_COMMIT, GUARD)
+    except e:
+        caught = True
+    failures += check("create(reserve~2^63) raises on wrap (H3)", caught)
+
+    caught = False
+    try:
+        # SIZE_MAX bit pattern (Int(-1)): the commit rounding itself wraps.
+        NativeStack.create(RESERVE, Int(-1), GUARD)
+    except e:
+        caught = True
+    failures += check("create(commit=SIZE_MAX) raises on wrap (H3)", caught)
+
+    # C-level ABI conformance: guard coercion, double-free, out-slots
+    # untouched, wrap boundaries (see s1_contract_probe_run in the probe).
+    var cbad = _contract_probe_run()
+    failures += check(
+        "C ABI contract probe (H2/H3 rows)",
+        cbad == 0,
+    )
+    if cbad != 0:
+        print("    contract probe failures: " + String(cbad))
+
+    # 7. accounting SSOT regression (H4 + SHOULD 1) -------------------------
+    # initial_commit of PAGE+4096: C rounds to 2 pages. Pre-fix bookkeeping
+    # recorded the raw request, so grow()'s span_start landed mid-page and
+    # mprotect failed with -EINVAL (-22) despite free room.
+    var st4 = NativeStack.create(RESERVE, PAGE + 4096, GUARD)
+    failures += check(
+        "committed_bytes normalized from C geometry (H4)",
+        st4.committed() == 2 * PAGE,
+    )
+    failures += check(
+        "reserved_bytes normalized from C geometry (H4)",
+        # SSOT reservation total = guard + page-rounded usable span.
+        st4.total_reserved() == RESERVE + GUARD,
+    )
+    var g4ok = False
+    var gb4 = st4.base_address()
+    var gt4 = st4.top_address()
+    try:
+        st4.grow(PAGE)  # page-multiple request passes the SHOULD-1 gate
+        g4ok = (
+            st4.committed() == 3 * PAGE
+            and st4.base_address() == gb4
+            and st4.top_address() == gt4
+        )
+    except e:
+        print("    grow raised: " + String(e))
+    failures += check("grow succeeds past previously-failing input (H4)", g4ok)
+
+    # SHOULD 1: non-page-multiple grow raises early (not downstream mprotect).
+    caught = False
+    try:
+        st4.grow(4096)
+    except e:
+        caught = True
+    failures += check("grow(non-page-multiple) raises early (S1)", caught)
+    failures += check(
+        "failed grow leaves bookkeeping intact",
+        st4.committed() == 3 * PAGE,
     )
 
     print("RESULT: all green" if failures == 0 else "RESULT: " + String(failures) + " FAILED")

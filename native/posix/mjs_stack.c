@@ -89,11 +89,32 @@ int mjs_stack_alloc(
 
     size_t ps = page_size();
 
-    /* Guard: at least one page, rounded up to whole pages. */
-    size_t guard = guard_bytes == 0 ? ps : round_up(guard_bytes, ps);
+    /* Frozen ABI (header): guard_bytes must be a POSITIVE page multiple.
+     * Leniency here would contradict the header's "-EINVAL" contract
+     * (panel H2); callers wanting coercion pre-round at their layer. */
+    if (guard_bytes == 0 || guard_bytes % ps != 0) {
+        errno = EINVAL;
+        return -EINVAL;
+    }
 
-    /* Usable: at least one page, rounded up to whole pages. */
-    size_t usable = round_up(reserve_bytes == 0 ? ps : reserve_bytes, ps);
+    /* Guard rounding may add up to ps-1 bytes; reject wrap-around (H3)
+     * instead of letting the arithmetic fold a huge request into a tiny,
+     * guard-less "successful" allocation. */
+    if (guard_bytes > SIZE_MAX - (ps - 1)) {
+        errno = EINVAL;
+        return -EINVAL;
+    }
+    size_t guard = round_up(guard_bytes, ps);
+
+    /* Usable: at least one page, rounded up to whole pages; same wrap
+     * gate (H3). */
+    size_t usable_req = reserve_bytes == 0 ? ps : reserve_bytes;
+    if (usable_req > SIZE_MAX - (ps - 1)) {
+        errno = EINVAL;
+        return -EINVAL;
+    }
+    size_t usable = round_up(usable_req, ps);
+
 
     if (guard > SIZE_MAX - usable) {
         errno = EINVAL;
@@ -101,15 +122,23 @@ int mjs_stack_alloc(
     }
     size_t total = guard + usable;
 
+    /* Commit size: rounded up to whole pages, clamped to the usable span.
+     * Computed BEFORE mmap so a wrap-around (H3) rejects without leaking
+     * the reservation. */
+    if (initial_commit_bytes > SIZE_MAX - (ps - 1)) {
+        errno = EINVAL;
+        return -EINVAL;
+    }
+    size_t commit = round_up(initial_commit_bytes, ps);
+    if (commit > usable)
+        commit = usable;
+
     /* Whole region PROT_NONE first: a pure reservation. */
     void *base = mmap(NULL, total, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (base == MAP_FAILED)
         return -errno;
 
     /* Commit the TOP initial_commit bytes only; never touches the guard. */
-    size_t commit = round_up(initial_commit_bytes, ps);
-    if (commit > usable)
-        commit = usable;
     if (commit > 0) {
         size_t commit_off = total - commit; /* offset from base of RW span */
         if (mprotect((char *)base + commit_off, commit,
@@ -153,8 +182,14 @@ int mjs_stack_alloc(
 }
 
 int mjs_stack_free(void **base) {
-    if (base == NULL || *base == NULL)
-        return 0; /* releasing nothing is success (double-free safe) */
+    /* Frozen ABI (header): double-free — an already-NULL *base, or a NULL
+     * slot pointer itself — is a -EINVAL error, mirroring mjs_vm_release.
+     * Callers that want idempotent release pre-check at their layer (the
+     * Mojo wrapper's __deinit__ does). */
+    if (base == NULL || *base == NULL) {
+        errno = EINVAL;
+        return -EINVAL;
+    }
 
     for (size_t i = 0; i < g_resv_len; ++i) {
         if (g_resv[i].base == *base) {
