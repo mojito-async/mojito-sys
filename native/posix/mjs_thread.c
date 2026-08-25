@@ -9,13 +9,18 @@
  *     for the external owner, one for the in-flight trampoline. The
  *     trampoline therefore keeps the handle allocated until it finishes,
  *     so join/detach on a still-running thread are memory-safe.
+ *   - the trampoline drops ITS OWN reference just before returning; the
+ *     consumer-facing primitives therefore drop exactly ONE reference —
+ *     the external owner's — and never touch the (already-released)
+ *     trampoline ref.
  *   - join: JOINABLE -> JOINED, reap via pthread_join (which also
  *     synchronizes the status write), publish the status, NULL *t, drop
- *     both refs.
- *   - detach: JOINABLE -> DETACHED and drops the external ref; when the
+ *     the external owner ref.
+ *   - detach: JOINABLE -> DETACHED, pthread_detach the thread, then drop
+ *     the external owner ref and NULL *t (handle consumed); when the
  *     trampoline finishes it drops its own ref and the handle frees at
- *     zero. Double-detach is rejected by the state CAS before anything
- *     else happens.
+ *     zero. Double-detach is rejected deterministically by the NULLed
+ *     handle (*t == NULL) before anything else happens.
  */
 #include "mojito_sys.h"
 
@@ -125,25 +130,42 @@ int mjs_thread_join(mjs_thread **t, long *out_result) {
         return -EINVAL; /* detached or already joined */
 
     /* Reap; pthread_join synchronizes-with the trampoline's status write. */
-    pthread_join(h->pt, NULL);
+    int rc = pthread_join(h->pt, NULL);
+    if (rc != 0) {
+        /* Roll the state back so the handle stays coherent (a concurrent
+         * detacher may have won the race — its CAS then simply fails).
+         * Failure contract: no status publish, *t untouched, refs untouched.
+         */
+        int rolled_back = MJS_TS_JOINED;
+        atomic_compare_exchange_strong(&h->state, &rolled_back,
+                                       MJS_TS_JOINABLE);
+        return -rc;
+    }
 
     if (out_result != NULL)
         *out_result = h->status;
     *t = NULL;
-    mjs_thread_unref(h); /* external owner */
-    mjs_thread_unref(h); /* trampoline finished */
+    mjs_thread_unref(h); /* external owner; trampoline already dropped its own */
     return 0;
 }
 
-int mjs_thread_detach(mjs_thread *t) {
-    if (t == NULL)
-        return -EINVAL;
+int mjs_thread_detach(mjs_thread **t) {
+    if (t == NULL || *t == NULL)
+        return -EINVAL; /* consumed/NULLed handle: deterministic rejection */
 
+    struct mjs_thread *h = *t;
     int expected = MJS_TS_JOINABLE;
-    if (!atomic_compare_exchange_strong(&t->state, &expected, MJS_TS_DETACHED))
+    if (!atomic_compare_exchange_strong(&h->state, &expected, MJS_TS_DETACHED))
         return -EINVAL; /* double-detach or already joined */
 
-    mjs_thread_unref(t); /* release the external owner; trampoline holds its
+    /* Hand the pthread back to the OS: without this POSIX keeps the stack
+     * mapping + thread structure alive forever (~16 KB/thread leak). */
+    int drc = pthread_detach(h->pt);
+    if (drc != 0)
+        return -drc; /* out-params untouched on failure */
+
+    *t = NULL;
+    mjs_thread_unref(h); /* release the external owner; trampoline holds its
                           * own ref and self-frees the handle at exit */
     return 0;
 }

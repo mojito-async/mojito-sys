@@ -5,12 +5,21 @@
  *   1. spawn/join round-trip returning the entry status;
  *   2. >=100 sequential spawn/join;
  *   3. >=32 concurrent spawns (distinct statuses + distinct self-ids);
- *   4. detach-then-exit safety (+ double-detach -EINVAL);
+ *   4. detach-then-exit safety (+ deterministic double-detach -EINVAL via
+ *      the consumed/NULLed handle);
  *   5. setname 15-char round-trip (parent and child side);
  *   6. self-id equal within a thread / unequal across threads;
- *   7. out-params untouched on every reachable failure path.
+ *   7. out-params untouched on every reachable failure path;
+ *   8. §38.5 shutdown/drain: N detached workers spawned, released, and
+ *      drained to zero via a started/finished handshake (handle frees are
+ *      verified by the ASan/UBSan leg's leak check).
  *
- * Build/run via tests/s2/native/run.sh.
+ * Gate atomics handed to detached workers have STATIC storage duration —
+ * block-scope gates would be stack-use-after-return UB once the spawning
+ * scope exits.
+ *
+ * Contract: exit status is authoritative — 0 iff every row above printed
+ * ok (the canonical tests/s2/native runner keys on exit status, not text).
  */
 
 #include "mojito_sys.h"
@@ -41,6 +50,32 @@ static int failures = 0;
 /* ---- entries ---------------------------------------------------------- */
 
 static long entry_status42(void *ud) { (void)ud; return 42; }
+
+/* Detached-drain probe: each worker acks entry into `started`, waits on
+ * its static gate, then acks exit into `finished` — the last action it
+ * can take before the runtime frees its handle. */
+static atomic_int drain_started;
+static atomic_int drain_finished;
+
+static long entry_drain_spinner(void *ud) {
+    atomic_int *gate = ud;
+    atomic_fetch_add_explicit(&drain_started, 1, memory_order_acq_rel);
+    while (atomic_load_explicit(gate, memory_order_acquire) == 0)
+        sched_yield();
+    atomic_fetch_add_explicit(&drain_finished, 1, memory_order_acq_rel);
+    return 0;
+}
+
+/* Poll *v until it reaches `want` (10 s ceiling). */
+static int wait_until_reaches(const atomic_int *v, int want) {
+    for (int ms = 0; ms < 10000; ms += 10) {
+        if (atomic_load_explicit(v, memory_order_acquire) >= want)
+            return 1;
+        struct timespec ts = {0, 10 * 1000 * 1000};
+        nanosleep(&ts, NULL);
+    }
+    return atomic_load_explicit(v, memory_order_acquire) >= want;
+}
 
 static long entry_echo(void *ud) { return (long)(intptr_t)ud; }
 
@@ -145,29 +180,36 @@ static void case_concurrent_32(void) {
           "concurrent: 32 simultaneous spawn/join with distinct statuses");
 }
 
+static atomic_int detach_exit_gate;
+static atomic_int detach_double_gate;
+
 static void case_detach_then_exit(void) {
+    /* 4a: spawn -> detach (handle consumed) -> release -> exit. */
     {
         mjs_thread *t = NULL;
-        atomic_int done = 0;
-        int rc = mjs_thread_spawn(entry_block, &done, 0, NULL, &t);
+        int rc = mjs_thread_spawn(entry_block, &detach_exit_gate, 0, NULL, &t);
         CHECK(rc == 0, "detach: spawn ok");
-        rc = mjs_thread_detach(t);
-        CHECK(rc == 0, "detach: detach returns 0");
-        atomic_store(&done, 1);
+        rc = mjs_thread_detach(&t);
+        CHECK(rc == 0 && t == NULL,
+              "detach: detach returns 0 and consumes the handle");
+        atomic_store(&detach_exit_gate, 1);
         struct timespec ts = {0, 200 * 1000 * 1000};
         nanosleep(&ts, NULL);
         CHECK(1, "detach: detached exit did not crash");
     }
-    /* 4b: double-detach is -EINVAL while the worker is still blocked
-     * (handle provably alive: the trampoline holds it). */
+    /* 4b: double-detach is -EINVAL deterministically — the first successful
+     * detach NULLed the handle, so the retry is rejected on *t == NULL even
+     * after the detached worker has long exited. */
     {
         mjs_thread *t = NULL;
-        atomic_int gate = 0;
-        CHECK(mjs_thread_spawn(entry_block, &gate, 0, NULL, &t) == 0,
+        CHECK(mjs_thread_spawn(entry_block, &detach_double_gate, 0, NULL,
+                               &t) == 0,
               "detach: blocked-worker spawn ok");
-        CHECK(mjs_thread_detach(t) == 0, "detach: first detach 0");
-        CHECK(mjs_thread_detach(t) == -EINVAL, "detach: double-detach -EINVAL");
-        atomic_store(&gate, 1);
+        CHECK(mjs_thread_detach(&t) == 0 && t == NULL,
+              "detach: first detach 0");
+        CHECK(mjs_thread_detach(&t) == -EINVAL,
+              "detach: double-detach -EINVAL (consumed handle)");
+        atomic_store(&detach_double_gate, 1);
         struct timespec ts = {0, 100 * 1000 * 1000};
         nanosleep(&ts, NULL);
     }
@@ -273,19 +315,67 @@ static void case_failure_out_untouched(void) {
     /* join after detach -> -EINVAL, out_result untouched. */
     {
         mjs_thread *t = NULL;
-        atomic_int gate = 0;
         long res = LONG_SENTINEL;
-        CHECK(mjs_thread_spawn(entry_block, &gate, 0, NULL, &t) == 0,
+        CHECK(mjs_thread_spawn(entry_block, &detach_exit_gate, 0, NULL,
+                               &t) == 0,
               "failure: spawn for join-after-detach ok");
-        CHECK(mjs_thread_detach(t) == 0, "failure: detach ok");
+        atomic_store(&detach_exit_gate, 0);
+        CHECK(mjs_thread_detach(&t) == 0 && t == NULL,
+              "failure: detach ok");
         CHECK(mjs_thread_join(&t, &res) == -EINVAL && res == LONG_SENTINEL,
               "failure: join-after-detach -EINVAL, out_result untouched");
-        atomic_store(&gate, 1);
+        atomic_store(&detach_exit_gate, 1);
         struct timespec ts = {0, 100 * 1000 * 1000};
         nanosleep(&ts, NULL);
     }
-    /* detach: NULL handle -> -EINVAL. */
-    CHECK(mjs_thread_detach(NULL) == -EINVAL, "failure: detach(NULL) -EINVAL");
+    /* detach: NULL handle pointer and consumed (NULLed) handle -> -EINVAL. */
+    {
+        mjs_thread *t = NULL;
+        CHECK(mjs_thread_detach(NULL) == -EINVAL,
+              "failure: detach(t=NULL) -EINVAL");
+        CHECK(mjs_thread_detach(&t) == -EINVAL,
+              "failure: detach(*t=NULL) -EINVAL");
+    }
+}
+
+/* §38.5 shutdown row: N detached workers, released together, drained to
+ * zero. The started/finished handshake proves every worker exited before
+ * we return; the runtime's free-at-zero of each consumed handle is then
+ * verified by the ASan leg (LSan) at process exit. */
+static void case_detached_drain(void) {
+    enum { N = 16 };
+    static atomic_int gates[N];   /* static: workers outlive this frame */
+    static mjs_thread *handles[N];
+
+    atomic_init(&drain_started, 0);
+    atomic_init(&drain_finished, 0);
+
+    int detached = 0;
+    for (int i = 0; i < N; i++) {
+        atomic_init(&gates[i], 0);
+        handles[i] = NULL;
+        if (mjs_thread_spawn(entry_drain_spinner, &gates[i], 0, NULL,
+                             &handles[i]) == 0 &&
+            mjs_thread_detach(&handles[i]) == 0 &&
+            handles[i] == NULL)
+            detached++;
+    }
+    CHECK(detached == N,
+          "shutdown: 16 workers spawned + detached, handles consumed");
+
+    CHECK(wait_until_reaches(&drain_started, N),
+          "shutdown: all 16 detached workers running");
+
+    for (int i = 0; i < N; i++)
+        atomic_store(&gates[i], 1);
+
+    CHECK(wait_until_reaches(&drain_finished, N),
+          "shutdown: all 16 workers exited — drain to zero complete");
+
+    /* Grace period so the final unrefs/handle frees land before exit;
+     * ASan's leak check then proves no handle was leaked. */
+    struct timespec ts = {0, 200 * 1000 * 1000};
+    nanosleep(&ts, NULL);
 }
 
 int main(void) {
@@ -298,6 +388,7 @@ int main(void) {
     case_setname();
     case_self_id();
     case_failure_out_untouched();
+    case_detached_drain();
 
     if (failures != 0) {
         printf("RESULT: %d FAILED\n", failures);

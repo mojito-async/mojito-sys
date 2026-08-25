@@ -109,11 +109,15 @@ int mjs_stack_free(void **base);
  * S2.1 native OS threads (issue #48). Same return-value contract as above:
  * 0 == success; negative == -errno; out-params UNTOUCHED on failure.
  *
+ * Blocking (SYS-5): every primitive here is non-blocking EXCEPT
+ * mjs_thread_join, which blocks until the target thread exits.
+ *
  * Handle lifetime: mjs_thread_spawn yields a JOINABLE handle owned by the
  * caller. mjs_thread_join or a successful mjs_thread_detach CONSUMES the
- * handle (join NULLs *t on success; after detach the handle is owned by the
- * runtime — further use is only defined while the detached thread provably
- * has not exited). A detached thread frees its handle when it exits.
+ * handle (both NULL *t on success); any later use of a consumed handle
+ * (*t == NULL) is a deterministic -EINVAL. A detached thread frees its
+ * handle when it exits; join and detach hand the pthread back to the OS
+ * (pthread_join / pthread_detach), so no per-thread resources outlive exit.
  */
 
 /* Thread entry point (spec §11): its return value is the status captured
@@ -127,28 +131,37 @@ typedef struct mjs_thread mjs_thread;
  * default; otherwise it must be >= PTHREAD_STACK_MIN (-EINVAL). name
  * (optional, NULL ok) is applied to the new thread inside its trampoline;
  * at most 15 chars + NUL is the portable floor — longer names are rejected
- * with -ENAMETOOLONG. On success returns 0 and stores the handle in *out. */
+ * with -ENAMETOOLONG. Precondition enforced: entry == NULL is -EINVAL.
+ * Non-blocking (SYS-5). On success returns 0 and stores the handle in
+ * *out. */
 int mjs_thread_spawn(ms_thread_entry entry, void *userdata,
                      size_t stack_size, const char *name,
                      mjs_thread **out);
 
-/* Join a joinable thread: stores the entry status in *out_result (may be
- * NULL to discard), NULLs *t, and frees the handle. Join-after-detach,
- * double-join, or a NULL or NULLed handle is -EINVAL with out_result
- * untouched. */
+/* Join a joinable thread. Blocks (SYS-5) until the target thread exits:
+ * stores the entry status in *out_result (may be NULL to discard), NULLs
+ * *t, and frees the handle. On pthread_join failure returns -errno with
+ * the joinable state rolled back — out_result untouched, *t untouched, no
+ * refs dropped. Join-after-detach, double-join, or a NULL or NULLed
+ * handle is -EINVAL with out_result untouched. */
 int mjs_thread_join(mjs_thread **t, long *out_result);
 
-/* Detach a joinable thread: the trampoline self-frees the handle on exit.
- * Double-detach (already detached/joined) is -EINVAL. */
-int mjs_thread_detach(mjs_thread *t);
+/* Detach a joinable thread: the thread reclaims its own resources at exit
+ * (pthread_detach) and self-frees its handle; the caller's reference is
+ * consumed — *t is NULLed on success, so double-detach degenerates to a
+ * deterministic -EINVAL (*t == NULL). Already detached/joined is also
+ * -EINVAL. Non-blocking (SYS-5). */
+int mjs_thread_detach(mjs_thread **t);
 
-/* Identity of the calling thread. Equality/uniqueness semantics ONLY —
- * the numeric value is non-portable (pthread_self cast). */
+/* Identity of the CALLING thread (non-blocking). Equality semantics among
+ * currently-live threads ONLY — POSIX may reuse pthread_t values after
+ * join, so equality across thread lifetimes carries no meaning; the
+ * numeric value itself is non-portable (pthread_self cast). */
 unsigned long mjs_thread_self_id(void);
 
 /* Set the CALLING thread's name (darwin pthread_setname_np is self-only;
  * SYS-7 divergence: portable floor is 15 chars + NUL, longer -> -ENAMETOOLONG).
- * NULL name is -EINVAL. */
+ * NULL name is -EINVAL. Non-blocking (SYS-5). */
 int mjs_thread_set_name(const char *name);
 
 #ifdef __cplusplus
