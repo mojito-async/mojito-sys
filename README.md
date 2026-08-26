@@ -27,6 +27,16 @@ Design rules (see [docs/mojito-sys_IMPLEMENTATION_SPEC.md](docs/mojito-sys_IMPLE
 - No hidden allocation on primitive fast paths; explicit blocking behavior.
 - Keep live stack addresses stable where users require it.
 
+## Module map
+
+| Package | Phase | Surface |
+| --- | --- | --- |
+| `mojito_sys.abi` | S1 | ABI negotiation (`abi_version`), decoded errno raises, callbacks, dynamic libraries |
+| `mojito_sys.memory` | S1 | Pages (`page`), stacks (`stack`), virtual memory (`virtual_memory`) |
+| `mojito_sys.io` | S1 | Raw descriptor handles (`io.handle`) |
+| `mojito_sys.thread` | S2 | OS threads (`NativeThread`, `spawn_native_thread`), TLS keys (`NativeTlsKey`), CPU topology + affinity (`cpu_logical_count`, `CpuSet`) |
+| `mojito_sys.time` | S4 | Monotonic clock (`monotonic`), durations (`duration`) |
+
 ## Status
 
 **Phase S0 — external-stack execution feasibility spike (go/no-go gate).**
