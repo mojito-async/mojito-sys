@@ -9,13 +9,23 @@
 #   - from_rc() absorbs the frozen negative-errno-return contract;
 #   - ok() reflects a zero code;
 #   - SysError layout is 8 bytes / 4-aligned;
-#   - to_string() names the common darwin errnos and domain ids.
-#
-# This file is red (does not compile) until abi/errors.mojo exists — the
-# expected TDD-red state for this lane.
+#   - to_string() names the common errnos and domain ids;
+#   - unknown-domain ids fall back to a deterministic numeric form and
+#     extension domains (documented non-reserved band) construct/compare
+#     like any other domain (S1.11, mojito-sys #44);
+#   - errno names are host-selected: darwin numbering on darwin, Linux
+#     numbering on Linux, with colliding codes (35, 11) resolved per-host
+#     and unlisted codes falling back to numeric (#44).
 
-from mojito_sys.abi.errors import ErrorDomain, SysError
+from mojito_sys.abi.errors import (
+    ErrorDomain,
+    SysError,
+    errno_name,
+    _errno_name_darwin,
+    _errno_name_linux,
+)
 from std.sys.info import align_of, size_of
+from std.sys import CompilationTarget
 
 
 # The six domain identity codes; used by the comptime pairwise-distinct check.
@@ -164,6 +174,78 @@ def run_checks() -> Int:
         print("S1.3 numeric fallback rows:         PASS")
     else:
         print("S1.3 numeric fallback rows:         FAIL")
+        failed += 1
+
+    # --- S1.11 (#44): error-domain policy + errno-name portability ---
+
+    # Unknown-domain ids outside the built-in tags format deterministically
+    # as domain<N> code <N> (diagnostic-only; consumers must not parse).
+    var unknown = SysError(ErrorDomain(99), 7)
+    if (
+        contains(unknown.to_string(), "domain99")
+        and contains(unknown.to_string(), "code 7")
+    ):
+        print("S1.11 unknown-domain fallback:      PASS")
+    else:
+        print("S1.11 unknown-domain fallback:      FAIL")
+        failed += 1
+
+    # Extension-domain example: downstream libraries mint domains from the
+    # documented non-reserved band (id >= 16); they construct, compare by
+    # value against the built-in tags, and carry SysError payloads like any
+    # other domain — including zero-is-success semantics.
+    var down = ErrorDomain(42)
+    var ext = SysError(down, 3)
+    if (
+        ext.domain == down
+        and not (down == ErrorDomain.POSIX)
+        and not (down == ErrorDomain.API)
+        and not ext.ok()
+        and SysError(down, 0).ok()
+        and contains(ext.to_string(), "domain42")
+        and contains(ext.to_string(), "code 3")
+    ):
+        print("S1.11 extension-domain example:     PASS")
+    else:
+        print("S1.11 extension-domain example:     FAIL")
+        failed += 1
+
+    # errno-name portability (#44): both host numberings are explicit and
+    # resolve colliding codes correctly — code 35 is EAGAIN on darwin but
+    # EDEADLK on Linux; code 11 is EAGAIN on Linux and unlisted on darwin
+    # (numeric fallback there). Unlisted codes fall back to "" in BOTH
+    # tables, so the numeric form is deterministic.
+    if (
+        _errno_name_darwin(35) == "EAGAIN"
+        and _errno_name_linux(35) == "EDEADLK"
+        and _errno_name_linux(11) == "EAGAIN"
+        and _errno_name_darwin(11) == ""
+        and _errno_name_darwin(999) == ""
+        and _errno_name_linux(999) == ""
+    ):
+        print("S1.11 errno table collisions 35/11: PASS")
+    else:
+        print("S1.11 errno table collisions 35/11: FAIL")
+        failed += 1
+
+    # The public dispatch is HOST-SELECTED: pin the EXACT expected name per
+    # compilation-target branch — a non-empty member-of-either-table
+    # assertion cannot catch a cross-table dispatch bug on single-host CI
+    # (both tables would agree with themselves). Unsupported targets keep
+    # the deterministic numeric fallback in to_string().
+    var expected_host_name = ""
+    if CompilationTarget().is_macos():
+        expected_host_name = "EAGAIN"
+    elif CompilationTarget().is_linux():
+        expected_host_name = "EDEADLK"
+    var host_name = errno_name(35)
+    if (
+        host_name == expected_host_name
+        and contains(SysError.from_posix(999999).to_string(), "errno 999999")
+    ):
+        print("S1.11 host-selected errno names:    PASS")
+    else:
+        print("S1.11 host-selected errno names:    FAIL")
         failed += 1
 
     # Construction no-raise is proven by reaching this line at all.
