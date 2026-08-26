@@ -259,6 +259,57 @@ int mjs_clock_now(uint64_t *out_ns);
  * out-slot fails with -EFAULT. */
 int mjs_clock_resolution(uint64_t *out_res_ns);
 
+/* --- s3-mutex --- */
+/*
+ * S3.1 native mutex (issue #57, spec §15). Same return-value contract as
+ * above: 0 == success; negative == -errno; out-params UNTOUCHED on failure.
+ *
+ * Handle lifetime: mjs_mutex_init yields an owned opaque handle in *out;
+ * mjs_mutex_destroy CONSUMES it (*m is NULLed on success). Any use of a
+ * consumed or NULL handle is a deterministic -EINVAL. Destroying a LOCKED
+ * mutex is a caller bug (POSIX-undefined); the caller must unlock first.
+ *
+ * try_lock result convention: 0 = acquired, -EBUSY = already locked. The
+ * -EBUSY is a STATUS, not a failure — callers map it to their "busy"
+ * boolean; every other negative value is a real error.
+ *
+ * Blocking (SYS-5): mjs_mutex_lock blocks the calling OS thread under
+ * contention (futex/ulock wait inside pthread_mutex_lock); try_lock and
+ * unlock never block; init/destroy may briefly wait on internal registry/
+ * kernel mutexes only insofar as the allocator and pthread_mutex_* do.
+ * Allocation (SYS-4): one fixed-size handle at init; NONE afterwards.
+ * Task-aware: no — OS-thread granularity; a blocked caller parks its
+ * whole OS thread (worker sleep/wake infrastructure per spec §14).
+ */
+
+/* Opaque native mutex handle (SYS-3). */
+typedef struct mjs_mutex mjs_mutex;
+
+/* Create a native mutex in the unlocked state. On success returns 0 and
+ * stores the handle in *out; NULL out-slot is -EFAULT with *out untouched. */
+int mjs_mutex_init(mjs_mutex **out);
+
+/* Lock the mutex. Blocks (SYS-5) until acquired under contention. A NULL
+ * handle is -EINVAL. Not recursive: re-locking from the owning thread is
+ * undefined (POSIX EDEADLK surface), never relied upon. */
+int mjs_mutex_lock(mjs_mutex *m);
+
+/* Try to lock WITHOUT blocking. Returns 0 if acquired, -EBUSY if already
+ * locked (status, see block comment), another negative -errno on error;
+ * NULL handle is -EINVAL. */
+int mjs_mutex_try_lock(mjs_mutex *m);
+
+/* Unlock the mutex previously locked by the CALLING thread. A NULL handle
+ * is -EINVAL; unlocking an unowned/unlocked mutex is POSIX-undefined and
+ * not validated here. Non-blocking (SYS-5). */
+int mjs_mutex_unlock(mjs_mutex *m);
+
+/* Destroy the mutex and free its handle: *m is NULLed on success, so any
+ * later use (including a second destroy) is a deterministic -EINVAL. On
+ * failure the handle is NOT consumed. NULL or NULLed *m is -EINVAL. */
+int mjs_mutex_destroy(mjs_mutex **m);
+
+
 #ifdef __cplusplus
 }
 #endif
