@@ -57,3 +57,5 @@ ms_context_capture
 ms_context_switch
 ms_context_destroy
 ms_context_set_finish_hook
+# --- s5-api (issue #67): additive dynamic-dispatch shim (C firewall) ---
+mjs_ctx_call
