@@ -26,7 +26,7 @@ status=$?
 echo ""
 echo "S1 ABI opaque-native-handles matrix (issue #27):"
 
-# The test emits its own t1..t4 + RESULT rows; echo them verbatim.
+# The test emits its own t7 + t1..t6 PASS/FAIL rows plus RESULT; echo verbatim.
 printf '%s\n' "$out" | grep -E '^(t[0-9]_|RESULT)' | sed 's/^/  /'
 
 if printf '%s' "$out" | grep -q 'RESULT: all green'; then
