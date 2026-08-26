@@ -139,12 +139,18 @@ static uint64_t uring_next_seq(struct mjs_uring *u)
     return s;
 }
 
-/* Hash + linear probe over the fd table. */
+/* Hash + linear probe over the fd table. The probe is bounded to r_cap
+ * iterations so a full table (no empty slot) cannot livelock; the caller
+ * checks r_count >= r_cap before inserting. */
 static unsigned uring_slot(struct mjs_uring *u, int fd)
 {
     unsigned h = (unsigned)((uint64_t)fd * 2654435761u) & (u->r_cap - 1u);
-    while (u->r_fds[h] != -1 && u->r_fds[h] != fd)
+    unsigned i;
+    for (i = 0; i < u->r_cap; i++) {
+        if (u->r_fds[h] == -1 || u->r_fds[h] == fd)
+            break;
         h = (h + 1u) & (u->r_cap - 1u);
+    }
     return h;
 }
 
@@ -461,6 +467,8 @@ int mjs_iouring_register(mjs_uring *p, int fd, uint32_t interests,
     if (fd < 0)
         return -EBADF;
 
+    if (p->r_count >= p->r_cap)
+        return -ENOSPC; /* table full: callers must unregister first */
     slot = uring_slot(p, fd);
     seq = uring_next_seq(p);
     if (p->r_fds[slot] == fd) {
@@ -480,8 +488,6 @@ int mjs_iouring_register(mjs_uring *p, int fd, uint32_t interests,
         p->r_int[slot] = interests;
         return 0;
     }
-    if (p->r_count >= p->r_cap)
-        return -ENOSPC; /* table full: callers must unregister first */
     rc = uring_submit_poll_add(p, fd, mjs_interests_to_poll(interests), seq);
     if (rc != 0)
         return rc;
