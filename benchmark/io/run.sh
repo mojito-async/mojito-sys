@@ -7,9 +7,14 @@
 # gateway/io/gate.sh against the committed baselines.tsv (documented
 # per-metric tolerance + direction, calibrated from observed variance), and
 # ends with `RESULT: all green` when nothing regressed.
-#
 # Usage: benchmark/io/run.sh     MOJO=/path/to/mojo CC=<cc>
 #   Expects to be run from a checkout where `make` works at the repo root.
+#
+# NOTE: this benchmark/io lane is NOT yet wired into the `make bench` target
+# (which currently runs only benchmark/spike/bench_switch.mojo); run it
+# directly via ./benchmark/io/run.sh (or `make bench-io` where available).
+# It is expected to land in `make bench` once both spikes are reviewed on
+# every supported backend.
 
 set -u
 

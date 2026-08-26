@@ -437,11 +437,15 @@ def measure_storm() raises:
         cum += monotonic_now().ticks - tw
         delivered += got_total
         rep += 1
-    while k < STORM_N:
-        p.unregister(NativeIoHandle(sp_tier[k * 2]))
-        _ = _close(sp_tier[k * 2])
-        _ = _close(sp_tier[k * 2 + 1])
-        k += 1
+    # `k` was consumed by the write loop above (already == STORM_N), so use a
+    # fresh index or this unregister/close loop would never run and every
+    # run would leak STORM_N * 2 fds.
+    var u = 0
+    while u < STORM_N:
+        p.unregister(NativeIoHandle(sp_tier[u * 2]))
+        _ = _close(sp_tier[u * 2])
+        _ = _close(sp_tier[u * 2 + 1])
+        u += 1
     p.close()
     if bad_token:
         emit_skip("poller.storm_events_per_sec", "bad token")
@@ -508,9 +512,25 @@ def measure_tier[TIER: Int](mut p: KqueuePoller, prefix: String) raises:
             ok = False
             break
         made += 1
-    if not ok or made < 128:
-        emit_skip("poller.reg_" + prefix + "_ops_per_sec", "pipe create failed mid-tier")
-        emit_skip("poller.wait_" + prefix + "_latency_ns", "pipe create failed mid-tier")
+    # A scale tier is labeled by its target size (reg_10240/wait_10240), so
+    # emitting that id for fewer created pipes would report a mislabeled
+    # baseline. Require the full target; on a partial tier record a caveat
+    # line (matching the S6.3 poller conformance suite) and SKIP rather than
+    # print a baseline against ~n registers.
+    if made != TIER:
+        print(
+            "caveat: scale tier " + prefix + " partial (created "
+            + String(made) + "/" + prefix
+            + " pipes; host fd ceiling hit) — skipped to avoid mislabeled baseline"
+        )
+        emit_skip(
+            "poller.reg_" + prefix + "_ops_per_sec",
+            "partial tier (created " + String(made) + "/" + prefix + ")",
+        )
+        emit_skip(
+            "poller.wait_" + prefix + "_latency_ns",
+            "partial tier (created " + String(made) + "/" + prefix + ")",
+        )
         var ci = 0
         while ci < made:
             _ = _close(pipes[ci * 2])
