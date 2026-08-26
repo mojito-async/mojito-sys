@@ -38,7 +38,10 @@
 #include <unistd.h>
 
 #define USABLE (64 * 1024)
-#define NSLOTS 21 /* 168 bytes / 8; asserted against ms_context_size() */
+/* Save-area slots: since #66 the record is v2's 168 bytes + a 4-slot
+ * per-context lifecycle tail = 200 bytes; asserted against
+ * ms_context_size() in geometry_and_validation(). */
+#define NSLOTS 25
 
 static int failures;
 
@@ -50,7 +53,7 @@ static int failures;
             failures++;                                            \
     } while (0)
 
-/* Caller-owned save areas (frozen: 168 B, 8-byte aligned). */
+/* Caller-owned save areas (v3: 200 B = v2's 168 B + lifecycle tail). */
 static _Alignas(8) unsigned long st_main[NSLOTS];
 static _Alignas(8) unsigned long st_a[NSLOTS];
 static _Alignas(8) unsigned long st_b[NSLOTS];
@@ -250,6 +253,10 @@ static void *p_stack(void)
 
 static void geometry_and_validation(void)
 {
+    /* #66: record = frozen v2 168 bytes + 4-slot lifecycle tail. */
+    CHECK(ms_context_size() == sizeof st_main &&
+              ms_context_size() == NSLOTS * sizeof(unsigned long),
+          "geometry: ms_context_size == v2 168B + lifecycle tail (200B)");
     /* Failed init must leave caller storage byte-for-byte untouched. */
     memset(st_a, 0xA5, sizeof(st_a));
     CHECK(ms_context_init(NULL, p_stack(), USABLE, pa_entry, &pa) == -EINVAL,

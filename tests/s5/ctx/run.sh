@@ -19,6 +19,11 @@
 #      Linux arm64 runner exists — never a silent skip), while an
 #      assemble-only smoke proves the __ELF__ half of the skeleton
 #      compiles on any host with a cross-target assembler.
+#   5. lifecycle acceptance (lifecycle/run.sh, #66): the self-contained
+#      per-context lifecycle — >64 simultaneous live contexts, >=4
+#      threads running independent switch pairs, exactly-once completion
+#      hook, loud FINISHED/RUNNING re-resume traps and loud misalignment
+#      rejection, at BOTH -O0 and -O2.
 #
 # Usage: tests/s5/ctx/run.sh
 #   CC=<cc> overrides the compiler.
@@ -223,6 +228,30 @@ else
 "
     fi
 fi
+
+# ---- issue #66 additions -------------------------------------------------
+echo ""
+echo "== s5_ctx_lifecycle rows (issue #66)"
+lrows=""
+# Self-contained per-context lifecycle: >64 live contexts, >=4 threads,
+# exactly-once finish hook, loud FINISHED/RUNNING re-resume traps,
+# loud misalignment rejection — at BOTH -O0 and -O2.
+out=$(sh "$SCRIPT_DIR/lifecycle/run.sh" 2>&1)
+st=$?
+printf '%s\n' "$out" | sed 's/^/   | /'
+if [ $st -eq 0 ] && printf '%s' "$out" | grep -q "RESULT: all green"; then
+    lrows="$lrows lifecycle O0 PASS
+ lifecycle O2 PASS
+"
+else
+    lrows="$lrows lifecycle FAIL
+"
+    failures=$((failures + 1))
+fi
+
+echo ""
+echo "S5 ctx issue-#66 matrix"
+echo "$lrows" | sed 's/^/  /'
 
 echo ""
 echo "S5 ctx issue-#65 matrix"
