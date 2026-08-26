@@ -108,12 +108,14 @@ int ms_context_init(ms_context *ctx, void *stack_low, size_t stack_size,
      * stack_low must be 16-aligned too: with a 16-multiple size this
      * makes stack_top aligned, so misalignment traps in mjs__ctx_make_raw
      * instead of returning -EINVAL from the only int-returning API here.
-     * KNOWN GAP (panel Systems finding, pre-#66): an adversarial
-     * stack_low near SIZE_MAX can wrap stack_top to a wild low address;
-     * callers pass real allocations (mjs_stack_alloc), so no overflow
-     * check is attempted here. */
+     * Overflow guard (#70, S5.7 panel mandate): an adversarial stack_low
+     * near SIZE_MAX can make stack_top = stack_low + stack_size fold to a
+     * wild low address. Reject that on the same -EINVAL path as the other
+     * geometry violations, with ctx untouched, so mjs__ctx_make_raw never
+     * sees a wrapped stack_top. */
     if (stack_size == 0 || (stack_size & 15u) != 0 ||
-        (((uintptr_t)stack_low) & 15u) != 0)
+        (((uintptr_t)stack_low) & 15u) != 0 ||
+        (uintptr_t)stack_low > UINTPTR_MAX - stack_size)
         return -EINVAL;
     mjs__ctx_make_raw(ctx, (unsigned char *)stack_low + stack_size, entry,
                       userdata);
