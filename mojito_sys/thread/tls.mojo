@@ -78,29 +78,13 @@ def mjs_tls_destroy(key: UInt) abi("C") -> Int32:
     ...
 
 
-# Module factory (spec §12 b2 amendment: creation is a module-level def, not
-# a @staticmethod — b2 1.0.0b2 raising staticmethods returning Self are not
-# expressible cleanly).
-#
-# Mint a TLS key whose per-thread values are passed to `destructor`
-# (a raw ms_callback code address; null = no destructor) exactly once at
-# each binding thread's exit with that thread's bound value. POSIX semantics
-# inherited from the C layer: a destructor does NOT fire for values still
-# bound when the key is destroyed — callers tearing down a key with
-# cross-thread bindings own draining those threads first.
-#
-# Blocking (SYS-5): may block briefly on the C layer's global registry mutex
-# and inside pthread_key_create (see the ceiling note above — acceptable at
-# create frequency, NOT a hot-path op).
-# Allocation: one stack scratch slot for the out-key (no heap allocation);
-# the C side may grow its key registry (one realloc) under the lock.
-# Task-aware: no — bindings are OS-thread-scoped, never task-scoped.
+# Module factory ALIAS (spec §12 spells creation as @staticmethod
+# NativeTlsKey.create(); b2 supports raising staticmethods returning Self
+# repo-wide — 27 documented sites, e.g. MonotonicInstant.now()). Retained
+# as a thin documented alias for call-site stability, mirroring
+# monotonic_now() in mojito_sys/time.
 def create_tls_key(destructor: TlsDtorPtr) raises -> NativeTlsKey:
-    var out_key = stack_allocation[1, UInt]()
-    var rc = mjs_tls_create(destructor, out_key)
-    if rc != 0:
-        raise_errno(rc)
-    return NativeTlsKey(out_key[])
+    return NativeTlsKey.create(destructor)
 
 
 struct NativeTlsKey(ImplicitlyCopyable):
@@ -116,6 +100,27 @@ struct NativeTlsKey(ImplicitlyCopyable):
     # NULL) on every operation.
     def __init__(out self, key_id: UInt):
         self.key = key_id
+
+    # Mint a TLS key whose per-thread values are passed to `destructor`
+    # (a raw ms_callback code address; null = no destructor) exactly once at
+    # each binding thread's exit with that thread's bound value. POSIX semantics
+    # inherited from the C layer: a destructor does NOT fire for values still
+    # bound when the key is destroyed — callers tearing down a key with
+    # cross-thread bindings own draining those threads first.
+    #
+    # Blocking (SYS-5): may block briefly on the C layer's global registry mutex
+    # and inside pthread_key_create (see the ceiling note above — acceptable at
+    # create frequency, NOT a hot-path op).
+    # Allocation: one stack scratch slot for the out-key (no heap allocation);
+    # the C side may grow its key registry (one realloc) under the lock.
+    # Task-aware: no — bindings are OS-thread-scoped, never task-scoped.
+    @staticmethod
+    def create(destructor: TlsDtorPtr) raises -> Self:
+        var out_key = stack_allocation[1, UInt]()
+        var rc = mjs_tls_create(destructor, out_key)
+        if rc != 0:
+            raise_errno(rc)
+        return NativeTlsKey(out_key[])
 
     # This CALLING thread's value for the key; the zero address when unset
     # or when the key is invalid/dead. Rebuild your typed pointer from the
