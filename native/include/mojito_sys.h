@@ -552,16 +552,23 @@ int mjs_event_destroy(mjs_event **e);
  *     regs[12] @   0.. 95  x19..x28, fp(x29) @80, lr(x30) @88
  *     fps[8]   @  96..159  low 64 bits of v8..v15 (d8..d15)
  *     sp       @ 160       saved stack pointer
- * Backends (#72): the frozen v2/v3 layout is shared verbatim by the
- * AArch64 backend (ms_context_aarch64.S) and, on x86-64 System V targets,
- * the x86-64 backend (ms_context_x86_64.S, spec §21 #2). On x86-64 SysV
- * the regs[12] prefix holds rbx,rbp,r12-r15 in slots [0..5] ([6..11]
- * reserved) and fps[8] holds the low 64 bits of xmm6..xmm13; xmm14/xmm15
- * are NOT preservable within the frozen record (a declared backend
- * limitation), the switch traps on the same misuse classes via int3, and
- * the backend is not NativeContext-supported until its conformance suite
- * passes (spec §38.6), tracked in tests/s5/x86.
+ * x86-64 restore-time trap #0x6b: besides the shared misuse classes, the
+ * x86-64 SysV backend ALSO traps (int3, %eax marker #0x6b) if a context's
+ * saved sp slot is not 16-byte aligned when a switch is about to restore
+ * it — SysV requires rsp ≡ 0 (mod 16) at callee entry, so a misaligned
+ * slot is corruption caught BEFORE the bad stack is committed (mirrors
+ * the make-time #0x64 class; the AArch64 backend's restore path has no
+ * alignment trap because its initial-sp invariant is enforced at make).
  *
+ * BACKEND SUPPORT STATUS (x86-64 SysV, read loudly): NOT
+ * NativeContext-supported yet. Native support requires FULL 128-bit
+ * preservation of the entire SysV callee-saved SIMD set — xmm14/xmm15 are
+ * still omitted because the frozen fps bank holds only 8 low-64 slots
+ * (SysV diverges from AAPCS64 here) — plus a passing in-repo conformance
+ * suite (spec §38.6). Until then the x86-64 SysV backend is a
+ * cross-assembled structural mirror only (assembles cleanly on this host;
+ * behavioral rows are RED-EXCLUDED UNSUPPORTED-PLATFORM until a
+ * Linux/x86_64 runner exists — tests/s5/x86).
  * Synthetic entry: ms_context_init prepares ctx so its first resume
  * lands on an internal trampoline that calls entry(userdata) with a
  * 16-byte-aligned sp (AAPCS64 at function entry). userdata is passed
