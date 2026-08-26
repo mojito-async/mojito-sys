@@ -56,3 +56,15 @@ ms_context_init
 ms_context_capture
 ms_context_switch
 ms_context_destroy
+mjs_socket_socket
+mjs_socket_set_nonblocking
+mjs_socket_bind
+mjs_socket_listen
+mjs_socket_connect
+mjs_socket_accept
+mjs_socket_recv
+mjs_socket_send
+mjs_socket_shutdown
+mjs_socket_close
+mjs_sockaddr_ipv4
+mjs_sockaddr_format4
