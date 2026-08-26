@@ -68,3 +68,10 @@ mjs_socket_shutdown
 mjs_socket_close
 mjs_sockaddr_ipv4
 mjs_sockaddr_format4
+mjs_poller_create
+mjs_poller_register
+mjs_poller_modify
+mjs_poller_unregister
+mjs_poller_wait
+mjs_poller_wake
+mjs_poller_close
