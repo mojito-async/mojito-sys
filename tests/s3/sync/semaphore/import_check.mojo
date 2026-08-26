@@ -11,7 +11,7 @@ from mojito_sys.time.monotonic import MonotonicInstant
 def main() raises:
     var ok = WaitStatus.ok == WaitStatus.ok
     var timed = WaitStatus.timed_out != WaitStatus.ok
-    var s = NativeSemaphore(0)
+    var s = NativeSemaphore()
     var dl = MonotonicInstant.now() + duration_from_millis(1)
     # Default construction is the inert/consumed state; no C call here.
     if ok and timed and s.destroyed and dl.ticks > 0:

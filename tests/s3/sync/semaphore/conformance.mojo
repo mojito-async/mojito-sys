@@ -187,7 +187,7 @@ def _waiter_entry(ud: CellsPtr) abi("C") -> Int64:
 # ud layout: [0]=sem handle [1]=permits to post [2]=done flag
 @export("mjs_s37_poster_entry")
 def _poster_entry(ud: CellsPtr) abi("C") -> Int64:
-    var n = ud[1]
+    var n = Int(ud[1])
     var i = 0
     while i < n:
         if _externs.probe_sem_post(ud[0]) != 0:
@@ -300,7 +300,7 @@ def main() raises:
 
     # ---- 5. P/V balance across threads -----------------------------------------
     var pv_args = stack_allocation[4, Int64]()
-    pv_args[1] = 0
+    pv_args[1] = Int64(P)  # poster issues exactly P permits
     pv_args[2] = -1000
     var pvs = NativeSemaphore.create(0)
     pv_args[0] = pvs.handle
@@ -420,7 +420,7 @@ def main() raises:
         failed += 1
 
     # ---- 8. uninitialized/consumed handle raises EINVAL --------------------------
-    var dead = NativeSemaphore(0)  # default = inert/consumed
+    var dead = NativeSemaphore()  # default = inert/consumed
     var misuse_ok = True
 
     try:
