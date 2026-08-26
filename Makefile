@@ -39,7 +39,7 @@ SELFTEST_BIN := $(BUILD)/selftest
 
 .DELETE_ON_ERROR:
 .PHONY: all selftest test bench test-s1 test-s2 test-s2-conformance \
-        test-s2-stress test-s2-integration test-s2-pkg test-s3 clean
+        test-s2-stress test-s2-integration test-s2-pkg test-s3 test-s5 clean
 
 all: $(DYLIB) $(SELFTEST_BIN) $(DYLIB_SYS)
 
@@ -96,7 +96,9 @@ test-s2-pkg: $(DYLIB_SYS)
 	MOJO=$(MOJO) ./tests/s2/pkg/run.sh
 
 test-s3: $(DYLIB_SYS)
-	MOJO=$(MOJO) ./tests/s3/run.sh
+
+test-s5: $(DYLIB_SYS)
+	MOJO=$(MOJO) ./tests/s5/run.sh
 
 -include $(SYS_DEPS)
 clean:
