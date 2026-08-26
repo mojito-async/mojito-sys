@@ -895,7 +895,118 @@ int mjs_poller_wake(mjs_poller *p);
  * any later use (including a second destroy) is a deterministic
  * -EINVAL. Registered DESCRIPTORS are NOT closed. On failure the
  * handle is NOT consumed. NULL or NULLed *p is -EINVAL. */
-int mjs_poller_close(mjs_poller **p);
+/* --- s6-ioring --- */
+/*
+ * S6.6 EXPERIMENTAL io_uring readiness backend (issue #78, spec §28/§30/
+ * §27.2/§31). Same return-value contract as above: 0 == success; negative
+ * == -errno; out-params UNTOUCHED on failure.
+ *
+ * EXPERIMENTAL / CAPABILITY FLAGGED (spec §28): io_uring MUST remain behind
+ * a capability/feature flag until operation coverage, cancellation
+ * semantics, kernel-version behavior and benchmarks are understood. A ring
+ * is ONLY instantiated when the host kernel supports io_uring AND the
+ * explicit environment flag MOJITO_IO_URING=1 is set; otherwise
+ * mjs_iouring_create returns EXACTLY -ENOSYS. mjs_iouring_available() is
+ * the authoritative capability predicate; mjs_iouring_probe() tests host
+ * kernel support alone.
+ *
+ * BACKEND GUARD: this block is io_uring-backed on Linux only. Hosts without
+ * io_uring (e.g. Darwin) return EXACTLY -ENOSYS from every entry point that
+ * requires a live ring (detect-and-exclude, mirroring the s6-poller kqueue
+ * block); mjs_iouring_probe/available return 0 there.
+ *
+ * The interests/event bitmask and the mjs_poll_event wire format are shared
+ * with the s6-poller block (same MJS_POLL_* flags, same 16-byte layout), so
+ * the §27.1 ReadinessPoller surface is drop-in across backends.
+ *
+ * Readiness semantics: one-shot edge polls (IORING_OP_POLL_ADD) re-armed
+ * after each delivery (§29 edge doctrine below the wrapper). register/
+ * modify UPSERT (last interests+token win); unregister of a not-registered
+ * descriptor is a no-op (0). Tokens ride through poll user_data and are
+ * preserved EXACTLY in delivered events (§31). EOF/error map from POLLHUP
+ * -> MJS_POLL_EOF and POLLERR -> MJS_POLL_ERROR.
+ *
+ * Wake: mjs_iouring_wake makes at most ONE blocked wait return 0 events. A
+ * wake with no waiter STICKS (the eventfd byte stays pending for exactly
+ * one later wait). wake NEVER blocks (SYS-5); only mjs_iouring_wait parks
+ * its calling OS thread, bounded by timeout_ns.
+ *
+ * wait status mapping:
+ *   0        — success; *out_n carries 0..cap events (0 == timeout);
+ *              wake deliveries NEVER occupy an out slot but DO end the
+ *              wait early;
+ *   -EINTR   — interrupted before any event: raw -EINTR, caller retries
+ *              (§38.11); timeout expiry is success-with-zero;
+ *   other    — genuine error, negative -errno verbatim.
+ * Events beyond cap are DROPPED (callers loop). cap == 0 is -EINVAL.
+ *
+ * Handle lifetime: create yields an owned opaque handle in *out; close
+ * CONSUMES it (**p NULLed on success). Any use of a consumed or NULL handle
+ * is a deterministic -EINVAL. The backend is NON-OWNING: closing it never
+ * closes registered descriptors (§25 borrow rule). Closing a REGISTERED
+ * descriptor silently retires its poll (§31 close-while-registered).
+ *
+ * Blocking (SYS-5): ONLY mjs_iouring_wait may block (bounded by timeout_ns
+ * when non-NULL); register/modify/unregister/wake/close/probe never block.
+ * Allocation (SYS-4): one ring handle + its fd/token tables at create; a
+ * fixed number of SQEs and ring pages afterwards.
+ * Task-aware: no — OS-thread granularity per spec §14.
+ */
+
+/* Opaque native io_uring backend handle (SYS-3). */
+typedef struct mjs_uring mjs_uring;
+
+/* Pure predicate: does THIS KERNEL support io_uring? Returns 1 if a tiny
+ * setup probe succeeds, 0 otherwise. Never blocks. */
+int mjs_iouring_probe(void);
+
+/* Full capability predicate (spec §28): host io_uring support AND
+ * MOJITO_IO_URING=1 set. Returns 1 iff a ring can be created. Never blocks. */
+int mjs_iouring_available(void);
+
+/* Create an io_uring-backed readiness ring. On success returns 0 and stores
+ * the handle in *out; NULL out-slot is -EFAULT with *out untouched. Without
+ * host support or the capability flag returns EXACTLY -ENOSYS with *out
+ * untouched. */
+int mjs_iouring_create(mjs_uring **out);
+
+/* Register `fd` for `interests` with opaque `token`. Re-registration of a
+ * live fd UPSERTS (last interests+token win); event-only flag bits in
+ * `interests` are -EINVAL. Non-blocking (SYS-5). */
+int mjs_iouring_register(mjs_uring *p, int fd, uint32_t interests,
+                         uint64_t token);
+
+/* Modify an existing registration (same upsert contract as register).
+ * Non-blocking (SYS-5). */
+int mjs_iouring_modify(mjs_uring *p, int fd, uint32_t interests,
+                       uint64_t token);
+
+/* Remove the registration for `fd`. Not-registered descriptors succeed (0);
+ * only real kernel errors (-errno) fail. Non-blocking (SYS-5). */
+int mjs_iouring_unregister(mjs_uring *p, int fd);
+
+/* Wait for readiness on ANY registered descriptor into `events` (up to cap
+ * entries; cap == 0 is -EINVAL). timeout_ns: NULL = block until an
+ * event/wake; *timeout_ns == 0 = non-blocking poll; otherwise relative
+ * nanoseconds. Timeout expiry is SUCCESS with *out_n == 0. Returns -EINTR
+ * raw for retry; out_n untouched on failure. Blocking (SYS-5): parks the
+ * calling OS thread per the timeout contract ONLY. */
+int mjs_iouring_wait(mjs_uring *p, mjs_poll_event *events, unsigned cap,
+                     const uint64_t *timeout_ns, unsigned *out_n);
+
+/* Make at most ONE blocked wait return promptly with zero events. A wake
+ * with no waiter sticks for exactly one later wait. Never blocks (SYS-5). */
+int mjs_iouring_wake(mjs_uring *p);
+
+/* Report the configured SQ and CQ entry counts (SQ/CQ geometry, §38.7
+ * io_uring-specific "SQ/CQ growth"). Non-blocking. */
+int mjs_iouring_entries(mjs_uring *p, unsigned *out_sq, unsigned *out_cq);
+
+/* Destroy the backend and free its handle: *p is NULLed on success, so any
+ * later use (including a second destroy) is a deterministic -EINVAL.
+ * Registered DESCRIPTORS are NOT closed. On failure the handle is NOT
+ * consumed. NULL or NULLed *p is -EINVAL. */
+int mjs_iouring_close(mjs_uring **p);
 
 
 #ifdef __cplusplus
