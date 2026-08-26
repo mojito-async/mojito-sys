@@ -85,11 +85,25 @@ from std.memory import stack_allocation
 #      arguments — the callee received `userdata` in BOTH the entry and
 #      userdata slots;
 #   2. letting ANY aggregate (ThreadOptions) flow by value into the frame
-#      that reaches the extern makes b2 either SIGSEGV while lowering or
-#      collapse the entry/userdata registers onto the options copy.
-# spawn_native_thread()/thread_spawn_args() below implement the proven
-# shape: options are unpacked OUTSIDE the extern-reaching frame, which
-# takes flat scalars and raw pointers only.
+#      that reaches the extern — or computing the name-pointer argument
+#      inside that frame (data-dependent loop merge) — makes b2 either
+#      SIGSEGV while lowering, emit an LLVM verifier failure
+#      (mjs_thread_spawn called with i64 where ptr expected), or collapse
+#      the entry/userdata registers onto one value.
+#   3. INVARIANT (never-inline): no function that reads an aggregate
+#      (ThreadOptions fields, NativeThread self) may reach an mjs_thread_*
+#      binding, directly or through any inlined callee, and the
+#      extern-reaching frame must not compute its pointer arguments via
+#      data-dependent merges (the carve loop). b2 1.0.0b2 exposes no
+#      no-inline attribute (@always_inline exists; a no-inline equivalent
+#      does not — both directions were tried and reproduce the crash), so
+#      the boundary is enforced by SHAPE: probes stay tiny/non-raising/
+#      aggregate-free in externs.mojo, and callers hand finished pointers
+#      carved in frames that never reach an extern.
+# thread_fill_name_cell() + spawn_native_thread() below implement the
+# proven shape: the name cell is carved OUTSIDE the extern-reaching frame,
+# in a buffer the caller owns, and that frame takes flat scalars/pointers
+# only.
 import mojito_sys.thread.externs as _externs
 
 comptime ThreadHandle = Int64
@@ -105,8 +119,12 @@ comptime StatusSlot = _externs.StatusSlot
 # Deterministic consumed-handle misuse code (frozen ABI: -errno).
 comptime EINVAL_RC = Int32(-22)
 
-# darwin ENAMETOOLONG: enforced wrapper-side at the 15-chars+NUL portable
-# floor (see _name_cell) — same observable contract as the C layer.
+# Wrapper-side ENAMETOOLONG spelling, enforced at the 15-chars+NUL
+# portable floor (SYS-7) before the FFI boundary — same observable
+# contract as the C layer. Spelling note: darwin numbers ENAMETOOLONG 63,
+# Linux 36; the decoded-NAME table in mojito_sys.abi.errors maps BOTH, so
+# `String(e)` carries the "ENAMETOOLONG" name regardless of host, and the
+# C layer's own rejection path decodes correctly on every host too.
 comptime ENAMETOOLONG_RC = Int32(-63)
 
 # Spec §11's NativeThreadId: raw OS-thread identity (non-portable value,
@@ -208,6 +226,18 @@ struct ThreadOptions:
             i += 1
         self.stack_size = stack_size
         self.priority_hint = priority_hint
+
+    # Contract check for the packed name: raises -ENAMETOOLONG when the
+    # captured name exceeded the 15-chars+NUL portable floor at
+    # construction (the ctor caps `name_len` and sets `name_too_long`
+    # instead of truncating silently). Deliberately extern-FREE: per the
+    # WORKAROUND above, no frame that has read this aggregate may reach an
+    # mjs_thread_* binding — validate() raises only.
+    #
+    # Blocking: no (SYS-5). Allocation: none (SYS-4). Task-aware: no.
+    def validate(self) raises:
+        if self.name_too_long:
+            raise_errno(ENAMETOOLONG_RC)
 
 
 struct NativeThread(Movable):
@@ -325,27 +355,32 @@ def spawn_native_thread(
     return NativeThread._adopt(slot[0])
 
 
-# Unpack ThreadOptions into the scalar pair spawn_native_thread() consumes
-# (stack size + NUL-terminated name cell). Deliberately SEPARATE from the
-# spawn path: this frame reads the options struct and must never reach an
-# extern (see the WORKAROUND note above). Raises -ENAMETOOLONG when the
-# captured name exceeds the 15-chars+NUL portable floor.
+# Fill a CALLER-PROVIDED 16-byte cell with options.name as a
+# NUL-terminated string and return the pointer to hand to
+# spawn_native_thread(); unnamed options yield the NULL cell. The cell is
+# carved in the CALLER's frame on purpose: b2 WORKAROUND (#49) forbids
+# pointer-computing loops inside the extern-reaching frame (they re-trigger
+# the register collapse), and a caller-carved cell provably outlives the
+# synchronous C call that consumes it. Raises -ENAMETOOLONG when the
+# captured name exceeded the 15-chars+NUL portable floor.
 #
-# Blocking: no (SYS-5). Allocation: one 16-byte scratch cell when named
-# (stack-carved, freed at spawning-frame teardown; SYS-4). Task-aware: no.
-def thread_spawn_args(options: ThreadOptions) raises -> Tuple[Int, NamePtr]:
+# Blocking: no (SYS-5). Allocation: none beyond the caller's cell (SYS-4).
+# Task-aware: no.
+def thread_fill_name_cell(
+    options: ThreadOptions,
+    cell: NamePtr,
+) raises -> NamePtr:
     if options.name_too_long:
         raise_errno(ENAMETOOLONG_RC)
     if options.name_len == 0:
-        return Tuple(options.stack_size, _null_name())
-    var buf = stack_allocation[16, Byte]()
+        return _null_name()
     var i = 0
     while i < options.name_len:
         var w = options.name_lo if i < 8 else options.name_hi
-        buf[i] = Byte((w >> ((i % 8) * 8)) & 0xFF)
+        cell[i] = Byte((w >> UInt64((i % 8) * 8)) & 0xFF)
         i += 1
-    buf[options.name_len] = 0
-    return Tuple(options.stack_size, NamePtr(buf))
+    cell[options.name_len] = 0
+    return cell
 
 
 # The NULL name cell: "unnamed" across the FFI boundary (b2 rejects

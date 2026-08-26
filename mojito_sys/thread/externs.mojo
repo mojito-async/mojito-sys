@@ -12,6 +12,14 @@
 # (memory/stack.mojo, memory/virtual_memory.mojo), so the bindings live
 # here and the NativeThread wrapper imports them.
 #
+#
+# NEVER-INLINE INVARIANT: the probe_* shims below are the ONLY sanctioned
+# call path into the mjs_thread_* bindings and MUST stay tiny, non-raising,
+# aggregate-free, and free of @always_inline at every call site. If an
+# inliner ever merges a probe into a frame that reads an aggregate or
+# computes a pointer argument across a data-dependent merge, the register
+# misbind returns (entry/userdata collapse; lldb-proven). See thread.mojo's
+# WORKAROUND block for the full trigger matrix.
 # These symbols are NOT for caller use; prefer spawn_native_thread() /
 # join() / detach() / native_thread_id() in mojito_sys.thread.thread.
 # Out-slots are UnsafePointer[..., MutAnyOrigin]: the pointer escapes into
