@@ -115,21 +115,36 @@ DYLIB="$REPO_ROOT/libmojito_sys.dylib"
 exp_status=1
 if [ -f "$DYLIB" ] && command -v nm >/dev/null 2>&1; then
     tmpdir=$(mktemp -d)
-    nm -gU "$DYLIB" | awk 'NF >= 3 {print $3}' | sed 's/^_//' | sort >"$tmpdir/actual"
-    grep -E '^mjs_(mutex_|condvar_|atomic_|event_)' "$tmpdir/actual" >"$tmpdir/actual_s3"
-    sed -e 's/#.*$//' -e '/^[[:space:]]*$/d' tests/s1/pkg/exports.txt \
-        | sed 's/[[:space:]]//g' | grep -E '^mjs_(mutex_|condvar_|atomic_|event_)' | sort >"$tmpdir/expected_s3"
-    missing_in_dylib=$(comm -23 "$tmpdir/expected_s3" "$tmpdir/actual_s3")
-    unlisted_exports=$(comm -13 "$tmpdir/expected_s3" "$tmpdir/actual_s3")
-    if [ -z "$missing_in_dylib" ] && [ -z "$unlisted_exports" ]; then
-        exp_status=0
+    # nm -gU is BSD/LLVM-only; GNU nm needs -g --defined-only. Probe both so
+    # the audit is portable; if NEITHER works, fail loudly below rather than
+    # silently comparing an empty symbol set.
+    if nm -gU "$DYLIB" >/dev/null 2>&1; then
+        NM_LIST="nm -gU"
+    elif nm -g --defined-only "$DYLIB" >/dev/null 2>&1; then
+        NM_LIST="nm -g --defined-only"
     else
-        [ -n "$missing_in_dylib" ] && printf '    | listed but NOT exported: %s\n' \
-            "$(echo "$missing_in_dylib" | tr '\n' ' ')"
-        [ -n "$unlisted_exports" ] && printf '    | exported but NOT listed: %s\n' \
-            "$(echo "$unlisted_exports" | tr '\n' ' ')"
+        NM_LIST=""
     fi
-    rm -rf "$tmpdir"
+    if [ -z "$NM_LIST" ]; then
+        rm -rf "$tmpdir"
+        echo "    | SKIP: no portable nm found (-gU and -g --defined-only both failed)"
+    else
+        $NM_LIST "$DYLIB" | awk 'NF >= 3 {print $3}' | sed 's/^_//' | sort >"$tmpdir/actual"
+        grep -E '^mjs_(mutex_|condvar_|atomic_|event_)' "$tmpdir/actual" >"$tmpdir/actual_s3"
+        sed -e 's/#.*$//' -e '/^[[:space:]]*$/d' tests/s1/pkg/exports.txt \
+            | sed 's/[[:space:]]//g' | grep -E '^mjs_(mutex_|condvar_|atomic_|event_)' | sort >"$tmpdir/expected_s3"
+        missing_in_dylib=$(comm -23 "$tmpdir/expected_s3" "$tmpdir/actual_s3")
+        unlisted_exports=$(comm -13 "$tmpdir/expected_s3" "$tmpdir/actual_s3")
+        if [ -z "$missing_in_dylib" ] && [ -z "$unlisted_exports" ]; then
+            exp_status=0
+        else
+            [ -n "$missing_in_dylib" ] && printf '    | listed but NOT exported: %s\n' \
+                "$(echo "$missing_in_dylib" | tr '\n' ' ')"
+            [ -n "$unlisted_exports" ] && printf '    | exported but NOT listed: %s\n' \
+                "$(echo "$unlisted_exports" | tr '\n' ' ')"
+        fi
+        rm -rf "$tmpdir"
+    fi
 else
     echo "    | libmojito_sys.dylib missing or nm unavailable"
 fi
@@ -138,10 +153,26 @@ row s3-audit-exports $exp_status
 # ---- 4. frozen-header append-only vs origin/main ---------------------------------
 hdr_status=1
 if git rev-parse --verify origin/main >/dev/null 2>&1; then
-    tmpdir=$(mktemp -d)
+    # Anchor to DECLARATION lines only (identifier immediately followed by
+    # an open paren), skipping comment lines — a doc mention of mjs_foo()
+    # inside a /* ... */ block is neither a declaration nor a removal.
+    decl_syms() {
+        awk '
+        {
+            t = $0
+            sub(/^[[:space:]]+/, "", t)
+            if (t ~ /^[*/]/ || t ~ /^\/\//) next   # comment lines
+            while (match(t, /mjs_[a-z0-9_]+[[:space:]]*\(/)) {
+                s = substr(t, RSTART, RLENGTH)
+                sub(/[[:space:]]*\($/, "", s)
+                print s
+                t = substr(t, RSTART + RLENGTH)
+            }
+        }' "$1" | sort -u
+    }
     git show origin/main:native/include/mojito_sys.h 2>/dev/null \
-        | grep -oE '\bmjs_[a-z0-9_]+' | sort -u >"$tmpdir/main_decls"
-    grep -oE '\bmjs_[a-z0-9_]+' native/include/mojito_sys.h | sort -u >"$tmpdir/head_decls"
+        | decl_syms /dev/stdin >"$tmpdir/main_decls"
+    decl_syms native/include/mojito_sys.h >"$tmpdir/head_decls"
     removed=$(comm -23 "$tmpdir/main_decls" "$tmpdir/head_decls")
     if [ -z "$removed" ]; then
         hdr_status=0
