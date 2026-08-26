@@ -92,15 +92,16 @@ def check(name: String, ok: Bool) -> Bool:
     return ok
 
 
-def now_plus(ms: UInt64) -> MonotonicInstant:
+def now_plus(ms: UInt64) raises -> MonotonicInstant:
     return MonotonicInstant.now() + duration_from_millis(ms)
 
 
-def host_enosys_rc() -> Int32:
-    # Host-spelled -ENOSYS of the frozen ABI (darwin 78 / Linux 38).
+def host_enosys_errno() -> Int32:
+    # Host-spelled POSITIVE ENOSYS errno (darwin 78 / Linux 38); negate
+    # for the frozen-ABI rc form.
     if CompilationTarget().is_macos():
-        return ENOSYS_DARWIN_RC
-    return ENOSYS_LINUX_RC
+        return Int32(78)
+    return Int32(38)
 
 
 def word_ptr_of(addr_int: Int64) -> WordCell:
@@ -132,17 +133,17 @@ def backend_present() raises -> Bool:
         _ = wait_on_u32(w, UInt32(1), Optional[MonotonicInstant](now_plus(50)))
         return True
     except e:
-        return not contains(String(e), "errno " + String(-host_enosys_rc()))
+        return not contains(String(e), "errno " + String(host_enosys_errno()))
 
 
-def adopt_join(handle: Int64) -> Bool:
+def adopt_join(handle: Int64) raises -> Bool:
     var joined = NativeThread()
     joined.handle = handle
     joined.consumed = False
     return joined.join() == 0
 
 
-def settle_ready(flags: CellsPtr, count: Int64) -> None:
+def settle_ready(flags: CellsPtr, count: Int64) raises -> None:
     # Wait until every waiter announced readiness in ITS OWN slot (no
     # shared-cell increments across threads), then hold the settle window
     # so the kernel has parked them before the harness wakes. Deadline-
@@ -150,7 +151,7 @@ def settle_ready(flags: CellsPtr, count: Int64) -> None:
     # of hanging the suite.
     var guard = now_plus(WAITER_TIMEOUT_MS)
     while MonotonicInstant.now() < guard:
-        var i = 0
+        var i = Int64(0)
         var all_ready = True
         while i < count:
             if flags[i] == 0:
@@ -200,7 +201,7 @@ def _ping_entry(ud: CellsPtr) abi("C") -> Int64:
     var turn = word_ptr_of(ud[0])
     var mine = UInt32(UInt64(ud[1]) & UInt64(0xFFFFFFFF))
     var rounds = ud[2]
-    var i = 0
+    var i = Int64(0)
     while i < rounds:
         try:
             var st = wait_on_u32(
@@ -231,7 +232,7 @@ def run_semantic_mode() raises -> Bool:
     w1[] = 2
     var t0 = MonotonicInstant.now()
     var st = wait_on_u32(w1, UInt32(1), Optional[MonotonicInstant](now_plus(2_000)))
-    var took_ms = (MonotonicInstant.now() - t0).as_millis()
+    var took_ms = MonotonicInstant.now().duration_since(t0).as_millis()
     imm_ok = (
         st == WaitStatus.ok
         and took_ms < 1_000  # far under the 2s deadline: EAGAIN, no park
@@ -246,7 +247,7 @@ def run_semantic_mode() raises -> Bool:
     w2[] = 7
     t0 = MonotonicInstant.now()
     st = wait_on_u32(w2, UInt32(7), Optional[MonotonicInstant](now_plus(60)))
-    took_ms = (MonotonicInstant.now() - t0).as_millis()
+    took_ms = MonotonicInstant.now().duration_since(t0).as_millis()
     exp_ok = st == WaitStatus.timed_out and took_ms >= UInt64(55)
     if not check("S3.3 expired deadline -> .timed_out", exp_ok):
         failed += 1
@@ -262,7 +263,7 @@ def run_semantic_mode() raises -> Bool:
     var one_args = stack_allocation[6, Int64]()
     var one_flag = stack_allocation[1, Int64]()
     one_flag[] = 0
-    one_args[0] = Int(w3)
+    one_args[0] = Int64(Int(w3))
     one_args[1] = Int64(5)
     one_args[2] = -99  # status sentinel
     var w = spawn_native_thread(
@@ -318,11 +319,11 @@ def run_semantic_mode() raises -> Bool:
     var pp_args1 = stack_allocation[4, Int64]()
     var turn_word = stack_allocation[1, UInt32]()
     turn_word[] = 0
-    pp_args0[0] = Int(turn_word)
+    pp_args0[0] = Int64(Int(turn_word))
     pp_args0[1] = 0
     pp_args0[2] = Int64(PING_ROUNDS)
     pp_args0[3] = 0
-    pp_args1[0] = Int(turn_word)
+    pp_args1[0] = Int64(Int(turn_word))
     pp_args1[1] = 1
     pp_args1[2] = Int64(PING_ROUNDS)
     pp_args1[3] = 0
@@ -336,7 +337,7 @@ def run_semantic_mode() raises -> Bool:
     var pp_ok = adopt_join(p0.handle) and adopt_join(p1.handle)
     pp_ok = pp_ok and pp_args0[3] == 0 and pp_args1[3] == 0
     pp_ok = pp_ok and turn_word[] == UInt32(0)  # even number of flips
-    var pp_ms = (MonotonicInstant.now() - budget_start).as_millis()
+    var pp_ms = MonotonicInstant.now().duration_since(budget_start).as_millis()
     pp_ok = pp_ok and pp_ms <= UInt64(120_000)
     if not check(
         "S3.3 ping-pong 10k x 10k zero hangs (wall clock "
@@ -352,10 +353,10 @@ def run_semantic_mode() raises -> Bool:
     var sp_args = stack_allocation[6, Int64]()
     var sp_flag = stack_allocation[1, Int64]()
     sp_flag[] = 0
-    sp_args[0] = Int(w5)
+    sp_args[0] = Int64(Int(w5))
     sp_args[1] = Int64(9)
     sp_args[2] = -99
-    sp_args[3] = Int(sp_flag)
+    sp_args[3] = Int64(Int(sp_flag))
     sp_args[4] = Int64(WAITER_TIMEOUT_MS)
     var sw = spawn_native_thread(
         entry_pointer["mjs_s33_waiter_entry"](), sp_args, 0, no_name()
@@ -391,7 +392,7 @@ def run_enosys_mode() raises -> Bool:
     # decoded host -ENOSYS spelling — clean red-exclusion for #60: no
     # sleeps, no partial state, stable across repeats.
     var failed = 0
-    var enosys_msg = "errno " + String(-host_enosys_rc())
+    var enosys_msg = "errno " + String(host_enosys_errno())
 
     var w = stack_allocation[1, UInt32]()
     w[] = 2
@@ -402,7 +403,7 @@ def run_enosys_mode() raises -> Bool:
         raise_ok = False  # must have raised
     except e:
         raise_ok = contains(String(e), enosys_msg)
-    var took_ms = (MonotonicInstant.now() - t0).as_millis()
+    var took_ms = MonotonicInstant.now().duration_since(t0).as_millis()
     raise_ok = raise_ok and took_ms < 1_000  # immediate: never slept
     if not check(
         "S3.3 absent backend: wait raises decoded ENOSYS immediately",
@@ -410,8 +411,9 @@ def run_enosys_mode() raises -> Bool:
     ):
         failed += 1
 
-    var wake_ok = wake_one_u32(w) == -Int(host_enosys_rc())
-    wake_ok = wake_ok and wake_all_u32(w) == -Int(host_enosys_rc())
+    var want = -Int(host_enosys_errno())
+    var wake_ok = wake_one_u32(w) == want
+    wake_ok = wake_ok and wake_all_u32(w) == want
     if not check(
         "S3.3 absent backend: wake_* return negative host ENOSYS", wake_ok
     ):
