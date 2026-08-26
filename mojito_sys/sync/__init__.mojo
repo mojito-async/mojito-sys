@@ -9,6 +9,7 @@ Spec surfaces bound to frozen C ABI blocks in native/include/mojito_sys.h:
   - mojito_sys.sync.mutex        NativeMutex                    (S3.1, #57)
   - mojito_sys.sync.condvar      NativeCondVar                  (S3.2, #58)
   - mojito_sys.sync.atomic_wait  u32 wait/wake cores            (S3.3, #59)
+  - mojito_sys.sync.event        NativeEvent                    (S3.5, #61)
 
 Subpackage scaffold; wrappers live in sibling modules.
 """
