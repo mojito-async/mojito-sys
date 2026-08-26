@@ -14,6 +14,12 @@
  *   3. completion hook fires EXACTLY ONCE per finished context, with
  *      userdata passed through (de-vacuates the T12 synthetic-stack
  *      completion stage, PR#21 BLOCK);
+ *   3b. finish-hook REGISTRY semantics: a hook registered after the
+ *      context has FINISHED never fires, and destroy discards any
+ *      registered hook;
+ *   3c. DIRTY-STORAGE regression: record tails poisoned to 0xAA before
+ *      init — state words must be written full-width so the misuse
+ *      guards still fire on dirty caller storage (panel P1-H1);
  *   4. re-resume of a FINISHED context traps loudly (SIGTRAP), observed
  *      in a forked child;
  *   5. re-resume of a RUNNING context (two threads on ONE context —
@@ -109,6 +115,16 @@ static int child_result(void (*fn)(void), int want_signal, int want_status)
         return WIFSIGNALED(st) && WTERMSIG(st) == want_signal &&
                !WIFEXITED(st);
     return WIFEXITED(st) && WEXITSTATUS(st) == want_status;
+}
+
+/* Poison a record's v3 lifecycle TAIL (bytes 168..199) with 0xAA before
+ * init: the header allows any caller storage (struct member, heap block,
+ * stack slot) with NO zero-init precondition, so the backend must write
+ * FULL-width state words — a 32-bit str would leave these dirty bytes
+ * above bit 31 and every state validation would misread (panel P1-H1). */
+static void poison_tail(void *rec)
+{
+    memset((unsigned char *)rec + 168, 0xAA, 32);
 }
 
 /* ---- shared trivial entry: does some work, then returns ---------------- */
@@ -334,6 +350,50 @@ static void test_finish_hook(void)
           "finish-hook: completed before resumer regained control");
 }
 
+/* ---- 3b. finish-hook REGISTRY semantics (panel SHOULD) ------------------ */
+
+static volatile long g_late_hits;
+
+static void late_hook(void *ud)
+{
+    (void)ud;
+    g_late_hits++;
+}
+
+static void test_hook_registry(void)
+{
+    static _Alignas(8) unsigned long st_m[NSLOTS];
+    static _Alignas(8) unsigned long st_c[NSLOTS];
+    static work_arg_t wa;
+    ms_context *m = (ms_context *)st_m;
+    ms_context *c = (ms_context *)st_c;
+
+    g_late_hits = 0;
+    poison_tail(c);
+    if (ms_context_init(c, p_stack(), USABLE, work_entry, &wa) != 0) {
+        CHECK(0, "hook-registry: init failed");
+        return;
+    }
+    ms_context_set_finish_hook(c, late_hook, NULL); /* registered pre-run */
+    ms_context_capture(m);
+    ms_context_switch(m, c); /* runs to completion; hook fires once */
+    CHECK(g_late_hits == 1,
+          "hook-registry: completion hook fired exactly once");
+
+    /* A hook registered AFTER the context has FINISHED never fires: the
+     * completion stage already ran and runs at most one lifetime. The
+     * registry entry just sits inert until destroy or revival. */
+    ms_context_set_finish_hook(c, late_hook, NULL);
+    usleep(10000); /* no async actor exists; settle window is sufficient */
+    CHECK(g_late_hits == 1, "hook-registry: hook-after-FINISH never fires");
+
+    /* Destroy discards any registered hook with the rest of the record
+     * (poisoned to DEAD). */
+    ms_context_destroy(c);
+    CHECK(g_late_hits == 1,
+          "hook-registry: destroy discards registered hook");
+}
+
 /* ---- 4. re-resume of FINISHED context ---------------------------------- */
 
 static void resume_finished_child(void)
@@ -344,6 +404,7 @@ static void resume_finished_child(void)
     ms_context *m = (ms_context *)st_m;
     ms_context *c = (ms_context *)st_c;
 
+    poison_tail(c); /* dirty upper state bits must not defeat the guard */
     if (ms_context_init(c, p_stack(), USABLE, work_entry, &wa) != 0)
         _exit(2);
     ms_context_capture(m);
@@ -384,6 +445,7 @@ static void resume_running_child(void)
     pthread_t t;
 
     g_run_target = (ms_context *)st_c;
+    poison_tail(g_run_target);
     if (ms_context_init(g_run_target, p_stack(), USABLE, run_entry,
                         NULL) != 0)
         _exit(2);
@@ -427,6 +489,7 @@ int main(void)
     test_bulk_live();
     test_threads_pairs();
     test_finish_hook();
+    test_hook_registry();
 
     CHECK(child_result(resume_finished_child, SIGTRAP, 0),
           "re-resume: FINISHED ctx traps (SIGTRAP in child)");

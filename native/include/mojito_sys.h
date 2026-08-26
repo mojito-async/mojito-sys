@@ -544,8 +544,11 @@ int mjs_event_destroy(mjs_event **e);
  * numeric-frame corruption without d8-d15 saves): Backend-pinned via
  * _Static_asserts in ms_context.c — INTERNAL to the library,
  * informational here, not a consumer promise; kept for the S5.2 ELF
- * port. Register-level backends address these slots directly:
- *   168 bytes total:
+ * port. Register-level backends address these slots directly. What is
+ * pinned here is the frozen v2 PREFIX; the #66 lifecycle tail appends a
+ * 4-slot v3 TAIL after it (168-byte prefix + 4 x uint64_t = 200 bytes
+ * total; see the Lifecycle paragraph below):
+ *   v2 prefix — 168 bytes:
  *     regs[12] @   0.. 95  x19..x28, fp(x29) @80, lr(x30) @88
  *     fps[8]   @  96..159  low 64 bits of v8..v15 (d8..d15)
  *     sp       @ 160       saved stack pointer
@@ -618,7 +621,10 @@ int ms_context_init(
 /* Save the CURRENT execution state into ctx: a later
  * ms_context_switch(to = ctx) resumes just after this call. Capturing a
  * context that is already live (initialized/captured but not finished)
- * overwrites its saved state. */
+ * overwrites its saved state. Capture also REVIVES a FINISHED record:
+ * the self-switch re-arm is unconditional, so after capture(ctx) a
+ * completed context reads SUSPENDED again and resumes normally from the
+ * freshly saved snapshot (#66 lifecycle). */
 void ms_context_capture(ms_context *ctx);
 
 /* Save the current state into `from` and resume `to`. Switching is
