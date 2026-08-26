@@ -20,7 +20,7 @@ def main():
     var tid = native_thread_id()
 
     # Touch the option fields so their accessors lower in this TU too.
-    _ = opts.name
+    _ = opts.name_len
     _ = opts.stack_size
     _ = opts.priority_hint
 

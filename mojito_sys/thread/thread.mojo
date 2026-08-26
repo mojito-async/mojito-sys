@@ -75,45 +75,32 @@
 from mojito_sys.abi.errors import raise_errno
 from std.memory import stack_allocation
 
-# Opaque mjs_thread* handle (SYS-3): never dereferenced Mojo-side; produced
-# by mjs_thread_spawn, consumed (NULLed by zero) on the C side. Carried as a
-# RAW MACHINE WORD (Int64) — see the b2 WORKAROUND note below.
+# b2 WORKAROUND (#49): the raw mjs_thread_* bindings live in a pure-extern
+# LEAF module (mojito_sys/thread/externs.mojo) that imports nothing and
+# hosts no Movable types; every extern invocation happens there through
+# non-raising same-module probe_* shims. Two lowering traps were isolated
+# under lldb + minimized repros (/tmp/b2repro):
+#   1. declaring the externs inside THIS module (which hosts Movable
+#      structs and raising machinery) misbinds the spawn call's register
+#      arguments — the callee received `userdata` in BOTH the entry and
+#      userdata slots;
+#   2. letting ANY aggregate (ThreadOptions) flow by value into the frame
+#      that reaches the extern makes b2 either SIGSEGV while lowering or
+#      collapse the entry/userdata registers onto the options copy.
+# spawn_native_thread()/thread_spawn_args() below implement the proven
+# shape: options are unpacked OUTSIDE the extern-reaching frame, which
+# takes flat scalars and raw pointers only.
+import mojito_sys.thread.externs as _externs
+
 comptime ThreadHandle = Int64
 
-# mjs_thread_spawn/join/detach all take mjs_thread** slots; declared here as
-# Int64 cells (the machine word holding the handle address).
-comptime HandleSlot = UnsafePointer[Int64, MutAnyOrigin]
-
-# b2 WORKAROUND (#49): this module deliberately avoids EVERY nested
-# UnsafePointer alias (pointer-to-pointer) and any duplicate adjacent
-# parameter types on its extern declarations. With them present, b2's
-# cross-module lowering misbound the spawn call's register arguments (the
-# callee received `userdata` in BOTH the entry and userdata slots —
-# reproduced under lldb; see the conformance suite header). Handles travel
-# as Int64 words and the null handle is the value 0.
-
-# Code address of a `long (*)(void *)` entry (ms_thread_entry). A bare Mojo
-# function value cannot be converted to this (see header); use the
-# @export + entry_pointer recipe above. Byte pointee is a formality — the
-# slot is a code address, never dereferenced through this type.
-comptime CThreadEntry = UnsafePointer[Byte, MutAnyOrigin]
-
-# void* userdata carrier handed to the entry untouched. Int64 pointee is
-# the recommended view (cells-style scratch); any pointer bitcast-safely
-# converts at the call site.
-#
-# b2 WORKAROUND (#49): entry/userdata are deliberately given DISTINCT
-# pointee types. With two adjacent identically-typed UnsafePointer[NoneType]
-# parameters, the cross-module lowering misbinds the register arguments
-# (the callee received `userdata` in BOTH slots) — reproduced minimized and
-# worked around here; see the conformance suite header for provenance.
-comptime UserdataPtr = UnsafePointer[Int64, MutAnyOrigin]
-
-# const char* NUL-terminated name; a null pointer encodes "unnamed".
-comptime NamePtr = UnsafePointer[Byte, MutAnyOrigin]
-
-# mjs_thread_join's long* out-result slot (entry status).
-comptime StatusSlot = UnsafePointer[Int64, MutAnyOrigin]
+# Re-exposed leaf aliases: same names this module always documented, bound
+# to the pure-extern leaf's definitions (see the WORKAROUND note above).
+comptime HandleSlot = _externs.HandleSlot
+comptime CThreadEntry = _externs.CThreadEntry
+comptime UserdataPtr = _externs.UserdataPtr
+comptime NamePtr = _externs.NamePtr
+comptime StatusSlot = _externs.StatusSlot
 
 # Deterministic consumed-handle misuse code (frozen ABI: -errno).
 comptime EINVAL_RC = Int32(-22)
@@ -126,39 +113,6 @@ comptime ENAMETOOLONG_RC = Int32(-63)
 # SYS-7; live-thread-scoped equality per the frozen header).
 comptime NativeThreadId = UInt64
 
-
-@extern("mjs_thread_spawn")
-def mjs_thread_spawn(
-    entry: CThreadEntry,
-    userdata: UserdataPtr,
-    stack_size: Int,
-    name: NamePtr,
-    out_handle: HandleSlot,
-) abi("C") -> Int32:
-    ...
-
-
-@extern("mjs_thread_join")
-def mjs_thread_join(
-    handle_slot: HandleSlot,
-    out_result: StatusSlot,
-) abi("C") -> Int32:
-    ...
-
-
-@extern("mjs_thread_detach")
-def mjs_thread_detach(handle_slot: HandleSlot) abi("C") -> Int32:
-    ...
-
-
-@extern("mjs_thread_self_id")
-def mjs_thread_self_id() abi("C") -> UInt64:
-    ...
-
-
-@extern("mjs_thread_set_name")
-def mjs_thread_set_name(name: NamePtr) abi("C") -> Int32:
-    ...
 
 
 # Null-pointer construction centralization: `unsafe_from_address=0` as a
@@ -198,8 +152,9 @@ struct ThreadOptions:
     """Per-spawn options (spec §11.2).
 
     Blocking: n/a (pure data).
-    Allocation: `name` String storage only; the NUL-terminated FFI copy is
-      made once inside spawn_native_thread().
+    Allocation: none — `name` is captured into a fixed 16-byte inline
+      buffer (the portable floor: 15 chars + NUL, SYS-7) at construction;
+      no heap traffic anywhere in this struct.
     Task-aware: no.
 
     name          : "" means unnamed (NULL across FFI); at most 15 chars +
@@ -211,9 +166,24 @@ struct ThreadOptions:
                     presented as identical across platforms). Currently
                     INERT — accepted but not forwarded (frozen s2-thread
                     ABI has no priority surface; see header docblock).
+
+    b2 WORKAROUND (#49, minimized in /tmp/b2repro): this struct MUST stay
+    POD. A String field flowing by-value through the extern-calling spawn
+    path makes b2's cross-module lowering either SIGSEGV while lowering or
+    bind mjs_thread_spawn's entry/userdata registers to one collapsed
+    value. The name therefore travels as fixed bytes + length + a
+    too-long flag (checked at spawn time with the same -ENAMETOOLONG the
+    C layer would return).
     """
 
-    var name: String
+    # Fixed-capacity name storage, packed into two machine words (only
+    # [0..name_len) is meaningful and name_len <= MJS_THREAD_NAME_MAX
+    # (15) — 16 bytes fit exactly). Excess input sets name_too_long
+    # instead of truncating silently.
+    var name_lo: UInt64  # bytes [0..8)
+    var name_hi: UInt64  # bytes [8..16)
+    var name_len: Int
+    var name_too_long: Bool
     var stack_size: Int
     var priority_hint: Int
 
@@ -223,7 +193,19 @@ struct ThreadOptions:
         stack_size: Int = 0,
         priority_hint: Int = 0,
     ):
-        self.name = name
+        self.name_lo = 0
+        self.name_hi = 0
+        var n = name.byte_length()
+        self.name_len = n if n <= 15 else 15
+        self.name_too_long = n > 15
+        var src = name.unsafe_ptr()
+        var i = 0
+        while i < self.name_len:
+            if i < 8:
+                self.name_lo |= UInt64(src[i]) << UInt64(i * 8)
+            else:
+                self.name_hi |= UInt64(src[i]) << UInt64((i - 8) * 8)
+            i += 1
         self.stack_size = stack_size
         self.priority_hint = priority_hint
 
@@ -280,7 +262,7 @@ struct NativeThread(Movable):
         var slot = stack_allocation[1, ThreadHandle]()
         slot[0] = self.handle
         var status = stack_allocation[1, Int64]()
-        var rc = mjs_thread_join(slot, status)
+        var rc = _externs.probe_join(slot, status)
         if rc != 0:
             raise_errno(rc)
         # C consumed the handle (*slot was NULLed — T** contract); mirror
@@ -301,49 +283,77 @@ struct NativeThread(Movable):
             raise_errno(EINVAL_RC)
         var slot = stack_allocation[1, ThreadHandle]()
         slot[0] = self.handle
-        var rc = mjs_thread_detach(slot)
+        var rc = _externs.probe_detach(slot)
         if rc != 0:
             raise_errno(rc)
         self.handle = slot[0]  # NULLed by C on success
         self.consumed = True
 
 
-# Spawn a native OS thread running entry(userdata) with `options`
-# (spec §11.1's NativeThread.spawn, shipped module-level per the b2
-# adaptation documented in the header: entries are C code addresses built
-# with the @export + entry_pointer recipe, not Mojo function values).
+# Spawn a native OS thread running entry(userdata) with an explicit stack
+# size and a NUL-terminated name cell (spec §11.1's NativeThread.spawn,
+# shipped module-level per the b2 adaptations documented in the header).
+#
+# b2 WORKAROUND (#49, minimized under /tmp/b2repro): ONLY scalars and raw
+# pointers may flow through a frame that reaches the mjs_thread_spawn
+# extern. A ThreadOptions value read inside such a frame (directly or via
+# any inlined callee) makes b2's cross-module lowering either SIGSEGV while
+# lowering or bind entry/userdata registers to one collapsed value. The
+# options-bearing convenience below therefore unpacks BEFORE the extern-
+# reaching frame, and this core takes flat scalars only.
 #
 # Raises (decoded errno) on: NULL entry (-EINVAL), undersized stack_size
-# (-EINVAL), overlong name (-ENAMETOOLONG), or resource exhaustion
-# (-EAGAIN/-ENOMEM).
-#
-# Two arities instead of a default argument: b2 rejects non-comptime
-# struct-typed default parameter values, and the call-site shape
-# (`spawn_native_thread(entry, ud)` vs `...(entry, ud, opts)`) is preserved.
+# (-EINVAL), or resource exhaustion (-EAGAIN/-ENOMEM).
 #
 # Blocking: no (SYS-5) — pthread_create returns once the child exists; the
 #   name is applied inside the child's trampoline.
-# Allocation: one scratch handle word + a NUL-terminated copy of
-#   options.name when naming is requested (bounded by caller input; one-time
-#   cold-path setup, not a fast-path primitive — SYS-4 carve-out).
+# Allocation: one scratch handle word (stack-carved, SYS-4).
 # Task-aware: no — deliberately raw OS thread (worker/blocking-pool
 #   infrastructure per spec §14; NOT a mojito task).
 def spawn_native_thread(
     entry: CThreadEntry,
     userdata: UserdataPtr,
-    options: ThreadOptions,
+    stack_size: Int,
+    name_cell: NamePtr,
 ) raises -> NativeThread:
     var slot = stack_allocation[1, ThreadHandle]()
-    var namep: NamePtr
-    if options.name.byte_length() == 0:
-        var zero = 0
-        namep = NamePtr(unsafe_from_address=zero)
-    else:
-        namep = _name_cell(options.name)
-    var rc = mjs_thread_spawn(entry, userdata, options.stack_size, namep, slot)
+    var rc = _externs.probe_spawn(
+        entry, userdata, stack_size, name_cell, slot,
+    )
     if rc != 0:
         raise_errno(rc)
     return NativeThread._adopt(slot[0])
+
+
+# Unpack ThreadOptions into the scalar pair spawn_native_thread() consumes
+# (stack size + NUL-terminated name cell). Deliberately SEPARATE from the
+# spawn path: this frame reads the options struct and must never reach an
+# extern (see the WORKAROUND note above). Raises -ENAMETOOLONG when the
+# captured name exceeds the 15-chars+NUL portable floor.
+#
+# Blocking: no (SYS-5). Allocation: one 16-byte scratch cell when named
+# (stack-carved, freed at spawning-frame teardown; SYS-4). Task-aware: no.
+def thread_spawn_args(options: ThreadOptions) raises -> Tuple[Int, NamePtr]:
+    if options.name_too_long:
+        raise_errno(ENAMETOOLONG_RC)
+    if options.name_len == 0:
+        return Tuple(options.stack_size, _null_name())
+    var buf = stack_allocation[16, Byte]()
+    var i = 0
+    while i < options.name_len:
+        var w = options.name_lo if i < 8 else options.name_hi
+        buf[i] = Byte((w >> ((i % 8) * 8)) & 0xFF)
+        i += 1
+    buf[options.name_len] = 0
+    return Tuple(options.stack_size, NamePtr(buf))
+
+
+# The NULL name cell: "unnamed" across the FFI boundary (b2 rejects
+# `unsafe_from_address=0` literals, so the zero travels through a runtime
+# local). Public because spawn_native_thread() takes the name cell
+# explicitly per the WORKAROUND-documented scalar spawn surface.
+def no_name() -> NamePtr:
+    return _null_name()
 
 # Identity of the CALLING thread (spec §11's current_id, shipped
 # module-level per the b2 adaptation documented in the header).
@@ -354,7 +364,7 @@ def spawn_native_thread(
 #   value is non-portable (SYS-7) and equality is meaningful among LIVE
 #   threads only (POSIX may reuse pthread_t values after join).
 def native_thread_id() -> UInt64:
-    return mjs_thread_self_id()
+    return _externs.probe_self_id()
 
 
 # Rename the CALLING thread.
@@ -367,8 +377,16 @@ def native_thread_id() -> UInt64:
 # Allocation: one NUL-terminated copy of `name`, stack-carved (SYS-4).
 # Task-aware: no — renames the OS thread, not any mojito task.
 def set_current_thread_name(name: String) raises:
+    _apply_thread_name(_name_cell_or_raise(name))
+
+
+def _name_cell_or_raise(name: String) raises -> NamePtr:
     if name.byte_length() == 0:
         raise_errno(EINVAL_RC)
-    var rc = mjs_thread_set_name(_name_cell(name))
+    return _name_cell(name)
+
+
+def _apply_thread_name(cell: NamePtr) raises:
+    var rc = _externs.probe_set_name(cell)
     if rc != 0:
         raise_errno(rc)
