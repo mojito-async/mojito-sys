@@ -560,8 +560,16 @@ static int uring_drain_cq(struct mjs_uring *p, mjs_poll_event *events,
             continue;
         }
         if (cqe->user_data == MJS_URING_WAKE) {
+            uint64_t v;
+            ssize_t drawn;
             *saw_wake = 1;
             p->wake_armed = 0;
+            /* Drain the wake eventfd so its sticky counter resets: without
+             * this, the re-armed wake poll would fire immediately on the next
+             * wait (one-release-then-clear semantics, mirroring the epoll
+             * backend's wake drain). */
+            drawn = read(p->wake_fd, &v, sizeof(v));
+            (void)drawn;
             continue;
         }
         {
