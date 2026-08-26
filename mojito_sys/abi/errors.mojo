@@ -63,6 +63,7 @@ def _unpack(v: Int) -> String:
 # Darwin-table scan. Returns "" for codes outside the darwin numbering.
 def _errno_name_darwin(code: Int32) -> String:
     var packed = Int(0)
+    var packed2 = Int(0)
     if code == 2:
         packed = 0x544E454F4E45  # "ENOENT"
     elif code == 13:
@@ -79,6 +80,16 @@ def _errno_name_darwin(code: Int32) -> String:
         packed = 0x544C55414645  # "EFAULT"
     elif code == 45:
         packed = 0x50555354_4F4E45  # "ENOTSUP"
+    elif code == 63 or code == 36:
+        # ENAMETOOLONG: darwin spells it 63, Linux 36 (both accepted here
+        # so the decoded NAME is host-independent for this code; the
+        # numeric value in to_string() still shows the raw host spelling).
+        # 12 chars > one Int word, so the name travels as two aligned
+        # words ("ENAMETOO" + "LONG"), still runtime-built from Ints.
+        packed = 0x4F4F54454D414E45  # "ENAMETOO"
+        packed2 = 0x474E4F4C  # "LONG"
+    if packed2 != 0:
+        return _unpack(packed) + _unpack(packed2)
     return _unpack(packed)
 
 
