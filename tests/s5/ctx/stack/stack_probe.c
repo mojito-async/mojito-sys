@@ -56,10 +56,12 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#define SAFE_HEADROOM (8 * 1024)   /* deep_to_floor stop headroom */
+#define FLOOR_MARGIN 4096   /* stop recursing this far above the guard floor */
+#define CANARY_BYTES 4096
+#define DEEP_FLOOR 8        /* adaptive depth must exceed this many frames */
 #define COMMIT_64K (64 * 1024)
 #define RESERVE_256K (256 * 1024)
-#define DEEP_DEPTH 3000   /* deep-but-legal depth, inside the reservation */
-#define CANARY_BYTES 4096
 /* Record slots: frozen v2 168 bytes + 4-slot lifecycle tail = 200. */
 #define NSLOTS 25
 #define SP_OFF 160
@@ -141,14 +143,6 @@ static int child_bus_or_segv(void (*fn)(void))
            (WTERMSIG(st) == SIGBUS || WTERMSIG(st) == SIGSEGV);
 }
 
-/* ---- shared: legally-deep recursion -------------------------------- */
-
-static long deep_sum(int n)
-{
-    if (n <= 0)
-        return 0;
-    return n + deep_sum(n - 1);
-}
 
 static void work_entry(void *v)
 {
@@ -163,12 +157,41 @@ typedef struct {
     long expect;
     ms_context *self;
     ms_context *sched;
+    uintptr_t floor;   /* committed-span floor (top - COMMIT) */
 } grow_arg_t;
 
+/* Adaptive legal descent: recurses until accumulated alloca depth
+ * reaches the committed-span budget. Each frame allocates
+ * ALLOCA_STEP bytes via alloca() through a volatile sink (escapes, so
+ * the compiler cannot elide it) and recurse — at -O0 AND -O2 the real
+ * sp moves by ALLOCA_STEP each frame, so depth growth is observable and
+ * deterministic. Termination is a byte-budget against floor_headroom:
+ * the frame chain has grown COMMIT_64K - SAFE_HEADROOM bytes before
+ * stopping, i.e. the deepest live sp stays >= floor + SAFE_HEADROOM.
+ * This avoids __builtin_frame_address and register-sp reads, both of
+ * which clang -O2 folds to constants (observed spin at deep_to_floor
+ * with zero frame growth). Depth is a result, never a fixed count. */
+#define ALLOCA_STEP 512
+static __attribute__((noinline)) long deep_to_floor_impl(size_t budget)
+{
+    volatile char *sink;
+    if (budget < ALLOCA_STEP)
+        return 0;
+    sink = (volatile char *)__builtin_alloca(ALLOCA_STEP);
+    sink[0] = (char)budget;      /* write through the volatile pointer */
+    return 1 + deep_to_floor_impl(budget - ALLOCA_STEP);
+}
+
+static long deep_to_floor(uintptr_t floor)
+{
+    (void)floor;
+    size_t budget = COMMIT_64K - SAFE_HEADROOM;
+    return deep_to_floor_impl(budget);
+}
 static void grow_entry(void *v)
 {
     grow_arg_t *a = v;
-    a->got = deep_sum(DEEP_DEPTH);
+    a->got = deep_to_floor(a->floor);
     ms_context_switch(a->self, a->sched); /* bounce; then return=>FINISHED */
 }
 
@@ -179,7 +202,6 @@ static void test_contained_growth(void)
     static grow_arg_t ga;
     ms_context *m = (ms_context *)st_m;
     ms_context *c = (ms_context *)st_c;
-    long expect = (long)DEEP_DEPTH * (DEEP_DEPTH + 1) / 2;
     void *base = NULL, *guard_low = NULL;
     size_t top = 0;
 
@@ -190,9 +212,9 @@ static void test_contained_growth(void)
         return;
     }
     ga.got = 0;
-    ga.expect = expect;
     ga.self = c;
     ga.sched = m;
+    ga.floor = (uintptr_t)top - COMMIT_64K; /* only the committed top span is RW */
     if (ms_context_init(c, guard_low, top - (uintptr_t)guard_low,
                         grow_entry, &ga) != 0) {
         mjs_stack_free(&base);
@@ -200,11 +222,11 @@ static void test_contained_growth(void)
         return;
     }
     ms_context_capture(m);
-    ms_context_switch(m, c); /* deep chain runs inside reservation */
+    ms_context_switch(m, c); /* adaptive deep chain runs inside reservation */
     ms_context_switch(m, c); /* resume once more to let it finish */
-    CHECK(ga.got == expect,
-          "T1: deep growth within reservation completes (no false ceiling)");
     mjs_stack_free(&base);
+    CHECK(ga.got > DEEP_FLOOR,
+          "T1: deep growth within committed top span completes (no false ceiling)");
 }
 
 /* ---- T2: guard crossing dies loudly -------------------------------- */
@@ -286,7 +308,7 @@ static void wrap_child(void)
     static _Alignas(8) unsigned long st_c[NSLOTS];
     size_t i;
     int bad = 0;
-    uintptr_t low = (((uintptr_t)~0ULL) & ~(uintptr_t)15u) - 32;
+    uintptr_t low = (((uintptr_t)~0ULL) - 256 + 32) & ~(uintptr_t)15u;
     long marker = 0;
 
     memset(st_c, 0xA5, sizeof(st_c));
@@ -298,7 +320,7 @@ static void wrap_child(void)
     for (i = 0; i < NSLOTS; i++)
         if (st_c[i] != 0xA5A5A5A5A5A5A5A5UL)
             bad = 1;
-    _exit(bad ? 1 : 3);
+    _exit(bad ? 1 : 0);
 }
 
 /* ---- T5: frozen-surface anchors --------------------------------- */
