@@ -152,28 +152,52 @@ MS_SYM(ms_context_switch):
         cmp     x0, x1
         b.eq    5f                              /* self-switch: capture */
 
-        /* Target validation (#66 per-record state machine). */
-        ldr     x16, [x1, #MS_CTX_STATE_OFF]
+        /* Target validation + ATOMIC arm (#66 per-record state machine;
+         * panel P1-H2). Plain check-then-act races: concurrent switchers
+         * can both observe SUSPENDED and both enter the target. The
+         * ldaxr/stlxrb exclusive pair makes arming RUNNING exclusive —
+         * the loser of a race re-validates and traps on the winner's
+         * RUNNING/FINISHED — so resume-of-RUNNING traps UNCONDITIONALLY
+         * instead of corrupting (printed header guarantee). */
+        /* Exclusive ops take no displacement: address the state slot
+         * through a scratch (x15). The BETWEEN-pair window must contain
+         * NO plain store to the SAME cache line as STATE: RETTO@176
+         * shares STATE@168's line, and a plain store there clears the
+         * exclusive monitor (Apple Silicon) — stlxr would fail forever.
+         * The ret_to write is therefore deferred until AFTER the arm
+         * succeeds (it is idempotent bookkeeping, not read by the arm). */
+        add     x15, x1, #MS_CTX_STATE_OFF
+4:      ldaxr   x16, [x15]
         cbz     x16, 7f                         /* DEAD storage: trap */
         cmp     x16, #MS_STATE_RUNNING
         b.eq    8f                              /* re-resume RUNNING: trap */
         cmp     x16, #MS_STATE_FINISHED
         b.eq    6f                              /* re-resume FINISHED: trap */
 
-        /* to->ret_to = from (most recent switcher of `to`) */
-        str     x0, [x1, #MS_CTX_RETTO_OFF]
-
         /* from->state: RUNNING -> SUSPENDED. Conditional so the
          * trampoline's post-completion switch-out (from == FINISHED)
-         * never demotes FINISHED. */
+         * never demotes FINISHED. Full-width store: the state slot must
+         * be validated as a clean 64-bit word even when the caller's
+         * storage carried garbage above bit 31 (panel P1-H1). Writes the
+         * FROM record — distinct storage from the target's line, so the
+         * target's exclusive reservation is untouched. */
         ldr     x16, [x0, #MS_CTX_STATE_OFF]
         cmp     x16, #MS_STATE_RUNNING
         b.ne    1f
-        mov     w16, #MS_STATE_SUSPENDED
-        str     w16, [x0, #MS_CTX_STATE_OFF]
+        mov     x16, #MS_STATE_SUSPENDED
+        str     x16, [x0, #MS_CTX_STATE_OFF]
 1:
-        mov     w16, #MS_STATE_RUNNING
-        str     w16, [x1, #MS_CTX_STATE_OFF]
+        /* Arm to=RUNNING exclusively (full-width). A lost race restarts
+         * validation at 4b: the winner made the target RUNNING (or it
+         * already completed), and this caller must trap, not corrupt. */
+        mov     x17, #MS_STATE_RUNNING
+        stlxr   w16, x17, [x15]
+        cbnz    w16, 4b
+
+        /* to->ret_to = from (most recent switcher of `to`). Idempotent;
+         * placed AFTER the arm so no same-line plain store ever sits in
+         * the exclusive window. */
+        str     x0, [x1, #MS_CTX_RETTO_OFF]
 
         /* belt+suspenders: a zeroed sp slot in a non-DEAD target is
          * corruption — trap instead of jumping through garbage. */
@@ -200,8 +224,8 @@ MS_SYM(ms_context_switch):
          * of its prior state — this REVIVES destroyed (DEAD) storage and
          * overwrites any live snapshot (header F4/capture contracts),
          * then resumes right here. */
-5:      mov     w16, #MS_STATE_SUSPENDED
-        str     w16, [x1, #MS_CTX_STATE_OFF]
+5:      mov     x16, #MS_STATE_SUSPENDED
+        str     x16, [x1, #MS_CTX_STATE_OFF]
         b       9f
 
 6:      brk     #0x66                           /* resume of FINISHED ctx */
@@ -257,8 +281,8 @@ MS_SYM(mjs__ctx_make_raw):
         str     xzr, [x0, #MS_CTX_RETTO_OFF]    /* no return target yet */
         str     xzr, [x0, #MS_CTX_FINCB_OFF]    /* no finish hook yet */
         str     xzr, [x0, #MS_CTX_FINUD_OFF]
-        mov     w15, #MS_STATE_EMPTY
-        str     w15, [x0, #MS_CTX_STATE_OFF]    /* armed, never run */
+        mov     x15, #MS_STATE_EMPTY
+        str     x15, [x0, #MS_CTX_STATE_OFF]    /* armed, never run */
         MS_ADRP(x16, mjs_ctx_trampoline)
         MS_ADDLO(x16, x16, mjs_ctx_trampoline)
         str     x16, [x0, #88]                  /* lr = trampoline */
@@ -298,8 +322,8 @@ MS_SYM(mjs_ctx_trampoline):
         ldr     x0, [x19, #MS_CTX_FINUD_OFF]
         blr     x16                             /* finish_cb(finish_userdata) */
 1:
-        mov     w16, #MS_STATE_FINISHED
-        str     w16, [x19, #MS_CTX_STATE_OFF]
+        mov     x16, #MS_STATE_FINISHED
+        str     x16, [x19, #MS_CTX_STATE_OFF]
         mov     x0, x19                         /* from = self */
         ldr     x1, [x19, #MS_CTX_RETTO_OFF]    /* to = permanent target */
 
