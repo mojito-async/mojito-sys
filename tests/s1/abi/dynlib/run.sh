@@ -39,6 +39,29 @@ if [ $status -eq 0 ] && printf '%s' "$out" | grep -q "RESULT: all green"; then
     exit 0
 fi
 
+# D12 — batch-review H2: the raw-handle constructor path is GONE. Compiling
+# `DynamicLibrary(<int>)` must FAIL (open_library()/main_library() are the
+# sole construction paths; unsafe_takeownership is module-internal).
+PROBE_DIR=$(mktemp -d)
+trap 'rm -rf "$PROBE_DIR"' EXIT
+cat > "$PROBE_DIR/d12_probe.mojo" <<'EOF'
+from mojito_sys.abi.dynlib import DynamicLibrary
+
+
+def main():
+    var lib = DynamicLibrary(1234)
+    _ = lib
+EOF
+d12="D12 raw-int ctor blocked"
+probe_out=$("$MOJO" run -I "$REPO_ROOT" "$PROBE_DIR/d12_probe.mojo" 2>&1)
+if [ $? -ne 0 ]; then
+    echo "PASS: $d12"
+else
+    echo "FAIL: $d12 (raw-handle constructor still compiles)"
+    printf '%s\n' "$probe_out" | sed 's/^/   | /'
+    exit 1
+fi
+
 echo ""
 echo "S1.13 ABI dynlib conformance matrix (issue #46)"
 echo "  $TEST_NAME FAIL"
