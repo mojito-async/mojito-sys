@@ -41,3 +41,6 @@ mjs_condvar_wait_until
 mjs_condvar_signal
 mjs_condvar_broadcast
 mjs_condvar_destroy
+mjs_atomic_wait_on_u32
+mjs_atomic_wake_one_u32
+mjs_atomic_wake_all_u32
