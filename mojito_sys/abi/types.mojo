@@ -21,7 +21,7 @@
 #   - LP64 width table this module conforms to (verified by
 #     tests/s1/abi/types/conformance.mojo):
 #       char 1, short 2, int 4, long 8, long long 8, size_t/ssize_t 8,
-#       pid_t 4, float 4, double 8, _Bool 1.
+#       pid_t 4, socklen_t 4, float 4, double 8, _Bool 1.
 #
 # Identity map (review PR #34, M2): every `c_*` name below resolves to a
 # real Mojo scalar with the C width:
@@ -31,7 +31,8 @@
 #   c_ulong_long=UInt64, c_size_t=UInt, c_ssize_t=Int (pointer-sized),
 #   c_float=Float32, c_double=Float64, c_pid_t=Int32 (pid_t is
 #   platform-defined but 32-bit signed on the supported targets),
-#   c_bool=Bool, c_intptr_t=Int, c_uintptr_t=UInt.
+#   c_socklen_t=UInt32 (spec §7.1 L630), c_bool=Bool, c_intptr_t=Int,
+#   c_uintptr_t=UInt.
 
 from std.ffi import c_char as _ffi_c_char
 from std.ffi import c_double as _ffi_c_double
@@ -71,6 +72,14 @@ comptime c_double = _ffi_c_double
 # c_pid_t maps to 64-bit Int on this toolchain — do not re-export that
 # binding; the supported-target pid_t is a signed 32-bit int.
 comptime c_pid_t = Int32
+
+# c_socklen_t: S1.14 decision (issue #47), PATH A — add now rather than
+# defer to S6. Spec §7.1 L630 says socket-length values MAY be normalized;
+# socklen_t is a 32-bit unsigned int on every supported target
+# (__darwin_socklen_t = __uint32_t on Darwin arm64/i386 per
+# sys/_types.h; uint32_t on Linux LP64), so binding it here gives the S6
+# socket lanes (#74) the correct vocabulary at trivial cost.
+comptime c_socklen_t = UInt32
 
 # Additional normalized names from spec §7.1's wish list, bound to Mojo
 # builtins directly (the std.ffi surface above is the only C-type coverage
@@ -157,6 +166,10 @@ struct CTypeSizes:
     @staticmethod
     def pid_t() -> Int:
         return _size_in_bytes(c_pid_t.dtype)
+
+    @staticmethod
+    def socklen() -> Int:
+        return _size_in_bytes(c_socklen_t.dtype)
 
     @staticmethod
     def bool() -> Int:
