@@ -83,6 +83,10 @@ def mjs_tls_destroy(key: UInt) abi("C") -> Int32:
 # repo-wide — 27 documented sites, e.g. MonotonicInstant.now()). Retained
 # as a thin documented alias for call-site stability, mirroring
 # monotonic_now() in mojito_sys/time.
+# Blocking: yes, briefly (SYS-5) — delegates to NativeTlsKey.create (registry
+#   mutex + pthread_key_create; see the ceiling note above).
+# Allocation: one stack scratch slot for the out-key (SYS-4).
+# Task-aware: no.
 def create_tls_key(destructor: TlsDtorPtr) raises -> NativeTlsKey:
     return NativeTlsKey.create(destructor)
 
