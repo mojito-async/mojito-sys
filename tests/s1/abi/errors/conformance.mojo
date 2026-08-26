@@ -25,6 +25,7 @@ from mojito_sys.abi.errors import (
     _errno_name_linux,
 )
 from std.sys.info import align_of, size_of
+from std.sys import CompilationTarget
 
 
 # The six domain identity codes; used by the comptime pairwise-distinct check.
@@ -227,16 +228,19 @@ def run_checks() -> Int:
         print("S1.11 errno table collisions 35/11: FAIL")
         failed += 1
 
-    # The public dispatch is HOST-SELECTED: it agrees with one of the two
-    # tables on supported hosts, and unlisted codes keep the deterministic
-    # numeric fallback in to_string().
+    # The public dispatch is HOST-SELECTED: pin the EXACT expected name per
+    # compilation-target branch — a non-empty member-of-either-table
+    # assertion cannot catch a cross-table dispatch bug on single-host CI
+    # (both tables would agree with themselves). Unsupported targets keep
+    # the deterministic numeric fallback in to_string().
+    var expected_host_name = ""
+    if CompilationTarget().is_macos():
+        expected_host_name = "EAGAIN"
+    elif CompilationTarget().is_linux():
+        expected_host_name = "EDEADLK"
     var host_name = errno_name(35)
     if (
-        host_name != ""
-        and (
-            host_name == _errno_name_darwin(35)
-            or host_name == _errno_name_linux(35)
-        )
+        host_name == expected_host_name
         and contains(SysError.from_posix(999999).to_string(), "errno 999999")
     ):
         print("S1.11 host-selected errno names:    PASS")
