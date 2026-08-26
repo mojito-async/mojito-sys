@@ -1,5 +1,5 @@
-# mojito-sys S3.1 — raw mjs_mutex_* FFI bindings (issue #57).
-#
+# mojito-sys S3.1+S3.2 — raw mjs_mutex_* / mjs_condvar_* FFI bindings
+# (issues #57, #58).
 # LEAF MODULE (b2 WORKAROUND precedent #49): this file deliberately
 # contains ONLY @extern declarations and the comptime pointer aliases
 # they need — no imports, no structs, no raise sites. b2 1.0.0b2's
@@ -81,3 +81,83 @@ def probe_unlock(handle: MutexHandle) -> Int32:
 
 def probe_destroy(slot: MutexSlot) -> Int32:
     return mjs_mutex_destroy(slot)
+
+
+# ---- S3.2: mjs_condvar_* bindings (issue #58) -------------------------------
+#
+# Same leaf-module discipline as the mjs_mutex_* block above. The
+# wait_until deadline is an ABSOLUTE monotonic nanosecond count (the
+# mjs_clock_now domain; the C layer maps it onto the platform's
+# pthread_cond clock — see the s3-condvar header block). wait_until
+# returns 0 / -ETIMEDOUT / -errno; the wrapper decodes the -ETIMEDOUT
+# STATUS into WaitStatus.timed_out.
+comptime CondHandle = Int64
+
+# mjs_condvar_init / mjs_condvar_destroy take mjs_condvar** slots.
+comptime CondSlot = UnsafePointer[Int64, MutAnyOrigin]
+
+# Single-level mjs_condvar* argument of signal/broadcast.
+comptime CondPtr = UnsafePointer[Int64, MutAnyOrigin]
+
+
+@extern("mjs_condvar_init")
+def mjs_condvar_init(out_slot: CondSlot) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_condvar_wait")
+def mjs_condvar_wait(c: CondPtr, m: MutexPtr) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_condvar_wait_until")
+def mjs_condvar_wait_until(
+    c: CondPtr, m: MutexPtr, deadline_ns: UInt64
+) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_condvar_signal")
+def mjs_condvar_signal(c: CondPtr) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_condvar_broadcast")
+def mjs_condvar_broadcast(c: CondPtr) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_condvar_destroy")
+def mjs_condvar_destroy(slot: CondSlot) abi("C") -> Int32:
+    ...
+
+
+def probe_cv_init(out_slot: CondSlot) -> Int32:
+    return mjs_condvar_init(out_slot)
+
+
+def probe_cv_wait(c: CondHandle, m: MutexHandle) -> Int32:
+    return mjs_condvar_wait(
+        CondPtr(unsafe_from_address=Int(c)),
+        MutexPtr(unsafe_from_address=Int(m)),
+    )
+
+
+def probe_cv_wait_until(c: CondHandle, m: MutexHandle, dl: UInt64) -> Int32:
+    return mjs_condvar_wait_until(
+        CondPtr(unsafe_from_address=Int(c)),
+        MutexPtr(unsafe_from_address=Int(m)),
+        dl,
+    )
+
+
+def probe_cv_signal(c: CondHandle) -> Int32:
+    return mjs_condvar_signal(CondPtr(unsafe_from_address=Int(c)))
+
+
+def probe_cv_broadcast(c: CondHandle) -> Int32:
+    return mjs_condvar_broadcast(CondPtr(unsafe_from_address=Int(c)))
+
+
+def probe_cv_destroy(slot: CondSlot) -> Int32:
+    return mjs_condvar_destroy(slot)
