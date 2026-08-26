@@ -87,6 +87,7 @@ else
         run_check s2-stress        make test-s2-stress
         run_check s2-integration   make test-s2-integration
         run_check s2-pkg           make test-s2-pkg
+        run_check s3-tests         make test-s3
         run_check no-markers  sh -c "! git grep -n -E '^(<<<<<<< |>>>>>>> )' -- native mojito_sys tests benchmark"
     else
         say "== fast suite (selftest, T1-T7) — fast=1"
@@ -98,6 +99,7 @@ else
         run_check s2-stress        make test-s2-stress
         run_check s2-integration   make test-s2-integration
         run_check s2-pkg           make test-s2-pkg
+        run_check s3-tests         make test-s3
         run_check no-markers  sh -c "! git grep -n -E '^(<<<<<<< |>>>>>>> )' -- native mojito_sys tests benchmark"
     fi
 fi
