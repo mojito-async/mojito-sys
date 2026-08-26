@@ -78,6 +78,11 @@ def addr_of(p: TlsValuePtr) -> Int:
     return Int(p)
 
 
+# Address of a test-local Int payload cell (typed pointer form).
+def cell_addr(p: UnsafePointer[Int, MutAnyOrigin]) -> Int:
+    return Int(p)
+
+
 def ptr_at(a: Int) -> TlsValuePtr:
     return TlsValuePtr(unsafe_from_address=a)
 
@@ -204,10 +209,10 @@ def main() raises:
     payload_b[] = 22
     var rt_ok = True
     rt_ok = rt_ok and (addr_of(k2.get()) == 0)  # unset -> null
-    k2.set(ptr_at(addr_of(payload_a)))
-    rt_ok = rt_ok and (addr_of(k2.get()) == addr_of(payload_a))
-    k2.set(ptr_at(addr_of(payload_b)))  # overwrite
-    rt_ok = rt_ok and (addr_of(k2.get()) == addr_of(payload_b))
+    k2.set(ptr_at(cell_addr(payload_a)))
+    rt_ok = rt_ok and (addr_of(k2.get()) == cell_addr(payload_a))
+    k2.set(ptr_at(cell_addr(payload_b)))  # overwrite
+    rt_ok = rt_ok and (addr_of(k2.get()) == cell_addr(payload_b))
     if rt_ok:
         print("S2.4 set-get-roundtrip-overwrite:        PASS")
     else:
@@ -216,10 +221,10 @@ def main() raises:
 
     # ---- 3. two-key isolation on ONE thread -------------------------------
     var k3 = create_tls_key(null_value())
-    k2.set(ptr_at(addr_of(payload_a)))
-    k3.set(ptr_at(addr_of(payload_b)))
-    var iso2_ok = (addr_of(k2.get()) == addr_of(payload_a)) and (
-        addr_of(k3.get()) == addr_of(payload_b)
+    k2.set(ptr_at(cell_addr(payload_a)))
+    k3.set(ptr_at(cell_addr(payload_b)))
+    var iso2_ok = (addr_of(k2.get()) == cell_addr(payload_a)) and (
+        addr_of(k3.get()) == cell_addr(payload_b)
     )
     if iso2_ok:
         print("S2.4 two-key-isolation-same-thread:      PASS")
@@ -236,20 +241,20 @@ def main() raises:
     var dtor_key = create_tls_key(
         entry_pointer["s24_tls_counting_dtor"]().bitcast[NoneType]()
     )
-    dtor_key.set(ptr_at(addr_of(main_payload)))
+    dtor_key.set(ptr_at(cell_addr(main_payload)))
 
     var wa = WorkerArg()
     wa.key_id = dtor_key.key
-    wa.bind_addr = addr_of(worker_payload)
+    wa.bind_addr = cell_addr(worker_payload)
 
     var spawn_rc = spawn_worker(UnsafePointer[WorkerArg, MutAnyOrigin](to=wa))
 
     var thread_ok = spawn_rc == 0
     thread_ok = thread_ok and (wa.set_rc == 0)
-    thread_ok = thread_ok and (wa.got_addr == addr_of(worker_payload))
+    thread_ok = thread_ok and (wa.got_addr == cell_addr(worker_payload))
     # Isolation: main's binding survived the worker's set on the same key id.
     thread_ok = thread_ok and (
-        addr_of(dtor_key.get()) == addr_of(main_payload)
+        addr_of(dtor_key.get()) == cell_addr(main_payload)
     )
     # Destructor fired EXACTLY ONCE at worker exit (join is the sync point).
     thread_ok = thread_ok and (worker_payload[] == 1)
@@ -274,7 +279,7 @@ def main() raises:
     var bogus_ok = addr_of(bogus.get()) == 0
     var bogus_set_raised = False
     try:
-        bogus.set(ptr_at(addr_of(payload_a)))
+        bogus.set(ptr_at(cell_addr(payload_a)))
     except e:
         bogus_set_raised = mentions_einval(String(e))
     bogus_ok = bogus_ok and bogus_set_raised
@@ -304,7 +309,7 @@ def main() raises:
     # set through a stale alias AFTER destroy: decoded -EINVAL raise.
     var stale_set_raised = False
     try:
-        stale.set(ptr_at(addr_of(payload_a)))
+        stale.set(ptr_at(cell_addr(payload_a)))
     except e:
         stale_set_raised = mentions_einval(String(e))
     uad_ok = uad_ok and stale_set_raised
@@ -334,7 +339,7 @@ def main() raises:
     var sentinel = stack_allocation[1, Int]()
     sentinel[] = 77
     var sw_key = create_tls_key(null_value())
-    sw_key.set(ptr_at(addr_of(sentinel)))
+    sw_key.set(ptr_at(cell_addr(sentinel)))
 
     var slots = stack_allocation[2, BytePtr]()
     if ms_stack_alloc(STACK_BYTES, slots, slots + 1) != 0:
@@ -351,7 +356,7 @@ def main() raises:
         ms_ctx_make(alt_ctx, (slots + 1)[], entry_pointer["s24_switch_alt"](), sfp)
         # Enter ALT; it yields straight back: one full suspend/resume cycle.
         ms_ctx_switch(main_ctx, alt_ctx)
-        cont_ok = cont_ok and (addr_of(sw_key.get()) == addr_of(sentinel))
+        cont_ok = cont_ok and (addr_of(sw_key.get()) == cell_addr(sentinel))
         ms_stack_free(slots[])
     if cont_ok:
         print("S2.4 switch-continuity-same-value:       PASS")
