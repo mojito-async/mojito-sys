@@ -49,3 +49,10 @@ mjs_event_wait
 mjs_event_wait_until
 mjs_event_signal
 mjs_event_destroy
+# --- s5-ctx (issue #64): frozen ms_context v2 ABI ---
+ms_context_size
+ms_context_alignment
+ms_context_init
+ms_context_capture
+ms_context_switch
+ms_context_destroy
