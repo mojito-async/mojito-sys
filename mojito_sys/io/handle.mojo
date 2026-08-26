@@ -1,13 +1,16 @@
 # mojito-sys S6.1 — native IO handles (issue #73).
 #
 # Spec §27.1: the readiness interface consumes `NativeIoHandle` as the
-# raw descriptor/HANDLE value type (`register(mut self, handle:
-# NativeIoHandle, ...)`). Spec §25 ownership semantics for the io
-# wrapper family: move transfers, borrow never closes, moved-from state
-# detectable in debug.
+# raw descriptor value type (`register(mut self, handle: NativeIoHandle,
+# ...)`). Spec §25 ownership semantics for the io wrapper family: move
+# transfers, borrow never closes, moved-from state detectable in debug.
 #
-# NativeIoHandle is deliberately NON-OWNING: it carries a raw descriptor /
-# HANDLE value and closes NOTHING on destruction (no destructor at all).
+# Scope: NativeIoHandle storage is Int32 — POSIX fd currency ONLY.  The
+# Win64 HANDLE/SOCKET values are pointer-sized, not Int32, and belong to
+# the §25 OwnedSocket/OwnedHandle family, not here.
+#
+# NativeIoHandle is deliberately NON-OWNING: it carries a raw Int32 fd
+# value and closes NOTHING on destruction (no destructor at all).
 # Ownership lives one layer up in the §25 family (OwnedFd/BorrowedFd,
 # issue #42); a poller that receives a NativeIoHandle borrows it for the
 # duration of a registration and never closes it.
@@ -24,10 +27,13 @@ comptime NO_FD: Int32 = -1
 
 
 # ---------------------------------------------------------------------------
-# NativeIoHandle — raw descriptor/HANDLE value type (spec §27.1).
+# NativeIoHandle — raw Int32 POSIX fd value type (spec §27.1).
 # ---------------------------------------------------------------------------
 struct NativeIoHandle(Movable):
-    """A raw, non-owning IO handle value (POSIX fd or platform HANDLE).
+    """A raw, non-owning IO handle value: Int32 POSIX fd currency ONLY.
+
+    Win64 HANDLE/SOCKET values are pointer-sized, not Int32; they belong
+    to the §25 OwnedSocket/OwnedHandle family and are out of scope here.
 
     Contract (spec §25/§27.1):
       - Move (`^`) TRANSFERS the token: the destination keeps the exact
