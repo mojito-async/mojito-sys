@@ -11,9 +11,9 @@
  *   - out_key UNTOUCHED on a failed create (exhaust the pthread key pool);
  *   - destructor fires EXACTLY ONCE at thread exit with the stored value.
  *
- * TODO(#54): import the full isolation/reuse conformance cases once S2.1
- * threads (#48) land — isolation across two spawned mjs_threads and the
- * 8-thread reuse-pool destructor-once sweep (spec L1850).
+ * The full isolation/reuse/destructor-once conformance over spawned
+ * mjs_threads lives in tests/s2/conformance/tls/conformance.mojo (issue
+ * #54, spec L1850).
  */
 
 #include <errno.h>

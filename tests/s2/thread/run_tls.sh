@@ -8,7 +8,8 @@
 #   - distinct nonzero keys; set/get round-trip + overwrite;
 #   - two-key isolation on one thread;
 #   - per-thread isolation over a spawned pthread + destructor-exactly-once
-#     (TODO(#54): NativeThread.spawn once S2.1 lands);
+#     (the NativeThread.spawn-driven legs live in tests/s2/conformance/tls,
+#     issue #54);
 #   - invalid-key / use-after-destroy decoded -EINVAL;
 #   - same value retained across a synthetic context switch.
 #
