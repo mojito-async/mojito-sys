@@ -126,6 +126,19 @@ def _deadline_slot(
     return slot
 
 
+# Block the calling OS thread while *address == expected, until a wake
+# on address, the deadline, or the word changing. Returns WaitStatus.ok
+# when woken OR the word did not hold `expected` at sleep time;
+# WaitStatus.timed_out when the deadline expired first. SPURIOUS .ok IS
+# PERMITTED: loop on the predicate (see wait_until_changed).
+#
+# Raises (decoded errno): -ENOSYS where no backend exists, -EFAULT for
+# a null address, anything else unexpected from the C layer.
+#
+# Blocking: YES while the word matches and no wake arrives (SYS-5),
+# bounded by `deadline` when given.
+# Allocation: none beyond one stack deadline cell (SYS-4).
+# Task-aware: no — parks the whole OS thread.
 def wait_on_u32[origin: Origin](
     address: UnsafePointer[UInt32, origin],
     expected: UInt32,
@@ -147,15 +160,21 @@ def wait_on_u32[origin: Origin](
 # Wake ONE waiter blocked on address (exact count, 0 when none waited).
 # Non-raising per the spec signature: negative returns are raw frozen-ABI
 # -errno statuses (-ENOSYS without a backend, -EFAULT for null) — visible,
-# never swallowed. Never blocks (SYS-5). Allocation: none (SYS-4).
+# never swallowed.
+#
+# Blocking: no (SYS-5) — wakes a waiter but never waits itself.
+# Allocation: none (SYS-4).
 # Task-aware: no.
 def wake_one_u32[origin: Origin](address: UnsafePointer[UInt32, origin]) -> Int:
     return Int(_externs.probe_wake_one(_word_ptr(address)))
 
 
 # Wake ALL waiters currently blocked on address (exact count). Same
-# non-raising status convention as wake_one_u32. Never blocks (SYS-5).
-# Allocation: none (SYS-4). Task-aware: no.
+# non-raising status convention as wake_one_u32.
+#
+# Blocking: no (SYS-5) — wakes waiters but never waits itself.
+# Allocation: none (SYS-4).
+# Task-aware: no.
 def wake_all_u32[origin: Origin](address: UnsafePointer[UInt32, origin]) -> Int:
     return Int(_externs.probe_wake_all(_word_ptr(address)))
 
