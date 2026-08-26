@@ -32,8 +32,8 @@ fi
 m_abi=$(git -C "$REPO_ROOT" grep -nE 'abi\.handles' -- mojito_sys tests benchmark native 2>/dev/null | grep -E '(OwnedFd|BorrowedFd|ms_close|NO_FD)' || true)
 m_multi=$(git -C "$REPO_ROOT" grep -nE 'from mojito_sys\.abi\.handles import \($' -- mojito_sys tests benchmark native 2>/dev/null | sed 's/^/MULTILINE-IMPORT /' || true)
 m_defs=$(git -C "$REPO_ROOT" grep -nE '^struct (OwnedFd|BorrowedFd)\b|^comptime NO_FD|^@extern\("close"\)' -- mojito_sys/abi 2>/dev/null | sed 's/^/STALE-DEF /' || true)
-m_io=$(git -C "$REPO_ROOT" grep -cE '^struct (OwnedFd|BorrowedFd)\b' -- mojito_sys/io/handle.mojo 2>/dev/null || echo 0)
-
+m_io=$(git -C "$REPO_ROOT" grep -cE '^struct (OwnedFd|BorrowedFd)' -- mojito_sys/io/handle.mojo 2>/dev/null | cut -d: -f2)
+[ -z "$m_io" ] && m_io=0
 if [ -n "$m_abi" ] || [ -n "$m_multi" ] || [ -n "$m_defs" ]; then
     echo "m_abi_paths_gone: FAIL"
     printf '%s\n%s\n%s\n' "$m_abi" "$m_multi" "$m_defs" | sed '/^$/d;s/^/  | /'
