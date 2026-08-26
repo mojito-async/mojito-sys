@@ -1,10 +1,9 @@
 /*
  * ms_context.c — dispatch half of the frozen ms_context v2 C ABI
  * (issue #64, spec §20.2).
- *
- * The register-level half lives in ms_context_aarch64.S (Darwin arm64;
- * ELF variant lands with S5.2, issue #65). This file owns everything that
- * is portable C:
+ * The register-level half lives in ms_context_aarch64.S, a single macro
+ * skeleton serving both Darwin Mach-O and Linux ELF (S5.2, issue #65).
+ * This file owns everything that is portable C:
  *   - the frozen v2 save-area definition, pinned by _Static_asserts to
  *     the offsets the asm hardcodes (regs @0, fps @96, sp @160, 168 B);
  *   - the sideband geometry getters;

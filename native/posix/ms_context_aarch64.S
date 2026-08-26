@@ -1,11 +1,35 @@
 /*
  * ms_context_aarch64.S — register-level backend for the frozen ms_context
- * v2 C ABI (issue #64, spec §20.2); AAPCS64, Apple arm64 Mach-O.
+ * v2 C ABI (issue #64, spec §20.2); AAPCS64, Darwin Mach-O AND Linux ELF
+ * (issue #65; spec §21 orders "AArch64 Darwin/Linux" first).
  *
  * Ported verbatim-in-structure from the panel-proven spike
  * spike/context_switch/aarch64_switch.S (5/5 APPROVE after amendment #19),
- * renamed to the frozen ABI. ELF/production hardening (bti c, PAC notes,
- * sentinel promotion) lands with S5.2 (issue #65).
+ * renamed to the frozen ABI.
+ *
+ * ONE skeleton, two ABIs: the instruction bodies below are shared
+ * verbatim and only symbol naming / addressing / section directives go
+ * through the MS_* preprocessor macros:
+ *   __APPLE__ (Mach-O): underscore-prefixed symbols, @PAGE/@PAGEOFF
+ *     addressing, private_extern internals, __DATA,__common zerofills;
+ *   __ELF__   (Linux): unprefixed symbols, :lo12 relocations, .hidden
+ *     internals (.local bookkeeping), .bss bookkeeping area, plus
+ *     .type/%function and .size on every function (spec §21 unwind/debug
+ *     metadata where practical — no .eh_frame for hand-written asm: the
+ *     synthetic trampoline has no C frame to describe).
+ *
+ * Hardening (issue #65): every entry point starts with `bti c` — hint-
+ * space NOP where BTI is not enforced; mandatory for _mjs_ctx_trampoline,
+ * which is reached by an INDIRECT branch (the restored lr), and kept on
+ * the direct-called entry points for uniformity.
+ *
+ * PAC limitation (S0 spike limitation folded here, DEFERRED — NOT fixed):
+ * built with default arm64 codegen — return addresses are UNSIGNED and
+ * pacibsp/autiasp pairing is absent. Under arm64e/PAC enforcement the
+ * saved lr would be signed per-frame and plain restore-and-ret would
+ * fault; pairing also requires every downstream frame (Mojo AOT) built
+ * with matching PAC. Recorded as an explicit limitation, revisit with
+ * S5.3/#66 lifecycle work.
  *
  * Frozen v2 layout (pinned by _Static_asserts in ms_context.c):
  *   regs[0..11] @   0..88 => x19..x30 (slot i => x(19+i); [10]=fp, [11]=lr)
@@ -26,26 +50,66 @@
  * lifecycle state without changing this frozen ABI.
  */
 
-#if !defined(__APPLE__)
-#error "ms_context_aarch64.S targets Apple arm64 (Mach-O) only; ELF lands with S5.2 (issue #65)"
+#if defined(__APPLE__)
+
+#define MS_SYM(name)                 _##name
+#define MS_PUB(name)                 .globl _##name
+#define MS_PRIV(name)                .private_extern _##name
+#define MS_TEXT                      .section __TEXT,__text,regular,pure_instructions
+#define MS_ADRP(reg, name)           adrp reg, _##name@PAGE
+#define MS_ADDLO(dst, base, name)    add dst, base, _##name@PAGEOFF
+#define MS_TAIL(name)                b _##name
+/* zerofill align=3 => 8-byte; each directive MUST expand to its own line —
+ * the Mach-O IAS does not honor a .zerofill after a `;` separator */
+#define MS_ZEROFILL(name, bytes)     .zerofill __DATA,__common,_##name,bytes,3
+
+#elif defined(__ELF__)
+
+#define MS_SYM(name)                 name
+#define MS_PUB(name)                 .globl name ; .type name,%function
+#define MS_PRIV(name)                .globl name ; .hidden name ; .type name,%function
+#define MS_TEXT                      .section .text,"ax",%progbits
+#define MS_ADRP(reg, name)           adrp reg, name
+#define MS_ADDLO(dst, base, name)    add dst, base, :lo12:name
+#define MS_TAIL(name)                b name
+
+#else
+#error "ms_context_aarch64.S requires __APPLE__ (Mach-O) or __ELF__ (Linux)"
 #endif
 
-/* PAC/BTI limitation (recorded in the spike, unchanged here): built with
- * default arm64 codegen — unsigned return addresses, no BTI landing pads.
- * Entry-point bti c / pacibsp pairing is S5.2 scope. */
+#if defined(__APPLE__)
+#define MS_FUNC_END(name)
+#else
+#define MS_FUNC_END(name)            .size name, .-name
+#endif
 
-.section __TEXT,__text,regular,pure_instructions
-
-/* ---- bookkeeping (single-threaded until S5.3) -------------------------- */
-.private_extern _ms_last_from
-.zerofill __DATA,__common,_ms_last_from,8,3
-.private_extern _ms_last_to
-.zerofill __DATA,__common,_ms_last_to,8,3
-.private_extern _mjs_resume_tab
-.zerofill __DATA,__common,_mjs_resume_tab,1024,3   /* 64 entries x {ctx,ret} */
+MS_TEXT
 
 .set MS_CTX_FPS_OFF, 96
 .set MS_CTX_SP_OFF, 160
+
+/* ---- bookkeeping (single-threaded until S5.3) -------------------------- */
+#if defined(__APPLE__)
+MS_PRIV(ms_last_from)
+MS_ZEROFILL(ms_last_from, 8)
+MS_PRIV(ms_last_to)
+MS_ZEROFILL(ms_last_to, 8)
+MS_PRIV(mjs_resume_tab)
+MS_ZEROFILL(mjs_resume_tab, 1024)          /* 64 entries x {ctx,ret} */
+#else
+.section .bss,"aw",@nobits
+.balign 8
+.local ms_last_from
+ms_last_from:
+        .zero   8
+.local ms_last_to
+ms_last_to:
+        .zero   8
+.local mjs_resume_tab
+mjs_resume_tab:
+        .zero   1024                          /* 64 entries x {ctx,ret} */
+MS_TEXT
+#endif
 
 /* ------------------------------------------------------------------------ */
 /* void ms_context_switch(ms_context *from [x0], ms_context *to [x1])        */
@@ -54,8 +118,9 @@
 /* of jumping through garbage.                                               */
 /* ------------------------------------------------------------------------ */
 .align 4
-.globl _ms_context_switch
-_ms_context_switch:
+MS_PUB(ms_context_switch)
+MS_SYM(ms_context_switch):
+        bti     c                               /* BTI landing pad (#65) */
         /* Save callee-saved GPRs + fp/lr into from->regs[0..11]. The
          * save happens FIRST so that capture-as-self-switch
          * (from == to, fresh zero-filled storage) becomes live here:
@@ -80,9 +145,9 @@ _ms_context_switch:
         ldr     x16, [x1, #MS_CTX_SP_OFF]
         cbz     x16, 7f
 
-        /* _mjs_resume_tab[to] = from  (most recent switcher of `to`) */
-        adrp    x16, _mjs_resume_tab@PAGE
-        add     x16, x16, _mjs_resume_tab@PAGEOFF
+        /* mjs_resume_tab[to] = from  (most recent switcher of `to`) */
+        MS_ADRP(x16, mjs_resume_tab)
+        MS_ADDLO(x16, x16, mjs_resume_tab)
         mov     x17, #64
 1:      ldr     x15, [x16]
         cbz     x15, 2f                         /* empty slot */
@@ -96,10 +161,12 @@ _ms_context_switch:
 2:      str     x1, [x16]
         str     x0, [x16, #8]
 
-        adrp    x16, _ms_last_from@PAGE
-        str     x0, [x16, _ms_last_from@PAGEOFF]
-        adrp    x16, _ms_last_to@PAGE
-        str     x1, [x16, _ms_last_to@PAGEOFF]
+        MS_ADRP(x16, ms_last_from)
+        MS_ADDLO(x16, x16, ms_last_from)
+        str     x0, [x16]
+        MS_ADRP(x16, ms_last_to)
+        MS_ADDLO(x16, x16, ms_last_to)
+        str     x1, [x16]
 
         /* restore `to` */
         ldp     d14, d15, [x1, #(MS_CTX_FPS_OFF+48)]
@@ -117,6 +184,7 @@ _ms_context_switch:
         ret                                     /* br x30 semantics */
 
 7:      brk     #0x68                           /* resume of dead context */
+MS_FUNC_END(ms_context_switch)
 
 /* ------------------------------------------------------------------------ */
 /* void mjs__ctx_make_raw(ms_context *ctx [x0], void *stack_top [x1],        */
@@ -127,8 +195,9 @@ _ms_context_switch:
 /* sp == stack_top (16-aligned; misalignment traps).                         */
 /* ------------------------------------------------------------------------ */
 .align 4
-.private_extern _mjs__ctx_make_raw
-_mjs__ctx_make_raw:
+MS_PRIV(mjs__ctx_make_raw)
+MS_SYM(mjs__ctx_make_raw):
+        bti     c                               /* BTI landing pad (#65) */
         tst     x1, #15
         b.ne    3f                              /* stack_top misaligned */
         stp     x2, x3, [x0, #0]                /* x19 = entry, x20 = userdata */
@@ -143,34 +212,37 @@ _mjs__ctx_make_raw:
         stp     x15, x15, [x0, #(MS_CTX_FPS_OFF+32)]   /* d12, d13 = 0 */
         stp     x15, x15, [x0, #(MS_CTX_FPS_OFF+48)]   /* d14, d15 = 0 */
         str     x1, [x0, #MS_CTX_SP_OFF]        /* sp = stack_top */
-        adrp    x16, _mjs_ctx_trampoline@PAGE
-        add     x16, x16, _mjs_ctx_trampoline@PAGEOFF
+        MS_ADRP(x16, mjs_ctx_trampoline)
+        MS_ADDLO(x16, x16, mjs_ctx_trampoline)
         str     x16, [x0, #88]                  /* lr = trampoline */
         ret
 3:      brk     #0x64                           /* stack_top not 16-aligned */
+MS_FUNC_END(mjs__ctx_make_raw)
 
 /* ------------------------------------------------------------------------ */
-/* Exit trampoline (private): entered via ms_context_switch `ret` with       */
-/*   x19 = entry, x20 = userdata, sp = stack_top (16-aligned).               */
+/* Exit trampoline (private): entered INDIRECTLY via ms_context_switch       */
+/* `ret` with x19 = entry, x20 = userdata, sp = stack_top (16-aligned).      */
 /* Calls entry(userdata); on return switches back to the most recent         */
 /* switcher. Resuming an already-exited context traps.                       */
 /* ------------------------------------------------------------------------ */
 .align 4
-.private_extern _mjs_ctx_trampoline
-_mjs_ctx_trampoline:
+MS_PRIV(mjs_ctx_trampoline)
+MS_SYM(mjs_ctx_trampoline):
+        bti     c                               /* indirect entry: needs BTI */
         sub     sp, sp, #16                     /* slot for self, below entry frames */
-        adrp    x15, _ms_last_to@PAGE
-        ldr     x15, [x15, _ms_last_to@PAGEOFF] /* self (valid on first entry) */
+        MS_ADRP(x15, ms_last_to)
+        MS_ADDLO(x15, x15, ms_last_to)
+        ldr     x15, [x15]                      /* self (valid on first entry) */
         str     x15, [sp]
 
         mov     x0, x20
         blr     x19                             /* entry(userdata) */
 
-        /* self = stashed pointer; return_to = _mjs_resume_tab[self] */
+        /* self = stashed pointer; return_to = mjs_resume_tab[self] */
         ldr     x0, [sp]
         add     sp, sp, #16
-        adrp    x16, _mjs_resume_tab@PAGE
-        add     x16, x16, _mjs_resume_tab@PAGEOFF
+        MS_ADRP(x16, mjs_resume_tab)
+        MS_ADDLO(x16, x16, mjs_resume_tab)
         mov     x17, #64
 4:      ldr     x15, [x16]
         cmp     x15, x0
@@ -183,5 +255,6 @@ _mjs_ctx_trampoline:
 
         adr     x17, 6f
         mov     x30, x17                        /* re-resume after exit traps */
-        b       _ms_context_switch              /* tail call: switch(self, return_to) */
+        MS_TAIL(ms_context_switch)              /* tail call: switch(self, return_to) */
 6:      brk     #0x66
+MS_FUNC_END(mjs_ctx_trampoline)
