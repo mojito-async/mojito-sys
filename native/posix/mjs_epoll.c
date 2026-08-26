@@ -57,10 +57,30 @@
  * transition 0 -> nonzero matters for the EPOLLIN wake). */
 static const uint64_t MJS_EPOLL_WAKE_VALUE = 1ull;
 
+/* Fixed-capacity open-addressed table mapping the ready DESCRIPTOR ->
+ * its token. epoll_event.data is ONE 64-bit slot, so the fd rides in
+ * data (recovered on wait) and the token lives in this table only
+ * (mirroring mjs_iouring's r_fds). The wake fd is never registered
+ * here, so a post-recovery compare to p->wfd discriminates the wake
+ * entry. Power of two so `& (CAP - 1)` is a legal wrap mask. */
+#define MJS_EPOLL_TABLE_CAP 256u
+
 struct mjs_epoller {
     int epfd;   /* epoll_create1 fd */
     int wfd;    /* eventfd wake source */
+    int table_fd[MJS_EPOLL_TABLE_CAP];      /* -1 = empty slot */
+    uint64_t table_tok[MJS_EPOLL_TABLE_CAP];
 };
+
+/* Match-address slot for `fd` (or the first empty slot if absent). */
+static unsigned mjs_epoll_slot(const mjs_epoller *p, int fd)
+{
+    unsigned h = (unsigned)(((uint64_t)fd * 2654435761u) &
+                            (MJS_EPOLL_TABLE_CAP - 1u));
+    while (p->table_fd[h] != -1 && p->table_fd[h] != fd)
+        h = (h + 1u) & (MJS_EPOLL_TABLE_CAP - 1u);
+    return h;
+}
 
 /* Validate interests: only the two registerable bits may be set. */
 static int mjs_epoll_check_interests(uint32_t interests)
@@ -75,8 +95,7 @@ static int mjs_epoll_check_interests(uint32_t interests)
 /* Add or replace ONE registration. op is EPOLL_CTL_ADD or EPOLL_CTL_MOD;
  * unregister uses EPOLL_CTL_DEL tolerating ENOENT (never-registered /
  * racing unregister degrade to no-ops per the header contract). */
-static int mjs_epoll_ctl(mjs_epoller *p, int op, int fd, uint32_t interests,
-                         uint64_t token)
+static int mjs_epoll_ctl(mjs_epoller *p, int op, int fd, uint32_t interests)
 {
     struct epoll_event ev;
 
@@ -90,7 +109,7 @@ static int mjs_epoll_ctl(mjs_epoller *p, int op, int fd, uint32_t interests,
     }
 
     memset(&ev, 0, sizeof(ev));
-    ev.data.u64 = token;
+    ev.data.fd = fd; /* the ready descriptor rides in epoll_event.data */
     if ((interests & MJS_POLL_READABLE) != 0u)
         ev.events |= EPOLLIN;
     if ((interests & MJS_POLL_WRITABLE) != 0u)
@@ -108,6 +127,7 @@ static int mjs_epoll_set(mjs_epoller *p, int fd, uint32_t interests,
                          uint64_t token, int is_add)
 {
     int rc;
+    unsigned slot;
 
     if (p == NULL)
         return -EINVAL;
@@ -116,8 +136,25 @@ static int mjs_epoll_set(mjs_epoller *p, int fd, uint32_t interests,
         return rc;
     if (fd < 0)
         return -EBADF;
-    return mjs_epoll_ctl(p, is_add ? EPOLL_CTL_ADD : EPOLL_CTL_MOD,
-                         fd, interests, token);
+
+    slot = mjs_epoll_slot(p, fd);
+    if (p->table_fd[slot] != -1 && p->table_fd[slot] != fd)
+        return -ENOSPC; /* table full */
+
+    rc = mjs_epoll_ctl(p, is_add ? EPOLL_CTL_ADD : EPOLL_CTL_MOD,
+                       fd, interests);
+    if (is_add && rc == -EEXIST) {
+        /* Upsert parity with kqueue EV_ADD: replace the existing entry
+         * (newest interests+token win). */
+        rc = mjs_epoll_ctl(p, EPOLL_CTL_MOD, fd, interests);
+    }
+    if (rc != 0)
+        return rc;
+
+    /* Record fd -> token only after the kernel accepted the entry. */
+    p->table_fd[slot] = fd;
+    p->table_tok[slot] = token;
+    return 0;
 }
 
 int mjs_epoll_create(mjs_epoller **out)
@@ -126,6 +163,7 @@ int mjs_epoll_create(mjs_epoller **out)
     mjs_epoller *p;
     int epfd;
     int wfd;
+    unsigned t;
 
     if (out == NULL)
         return -EFAULT;
@@ -160,6 +198,8 @@ int mjs_epoll_create(mjs_epoller **out)
     }
     p->epfd = epfd;
     p->wfd = wfd;
+    for (t = 0; t < MJS_EPOLL_TABLE_CAP; t++)
+        p->table_fd[t] = -1;
     *out = p;
     return 0;
 }
@@ -178,11 +218,18 @@ int mjs_epoll_modify(mjs_epoller *p, int fd, uint32_t interests,
 
 int mjs_epoll_unregister(mjs_epoller *p, int fd)
 {
+    unsigned slot;
+
     if (p == NULL)
         return -EINVAL;
     if (fd < 0)
         return -EBADF;
-    return mjs_epoll_ctl(p, EPOLL_CTL_DEL, fd, 0, 0);
+
+    slot = mjs_epoll_slot(p, fd);
+    if (p->table_fd[slot] == fd)
+        p->table_fd[slot] = -1;
+
+    return mjs_epoll_ctl(p, EPOLL_CTL_DEL, fd, 0);
 }
 
 int mjs_epoll_wait(mjs_epoller *p, mjs_poll_event *events, unsigned cap,
@@ -220,12 +267,14 @@ int mjs_epoll_wait(mjs_epoller *p, mjs_poll_event *events, unsigned cap,
     for (i = 0; i < (unsigned)n; i++) {
         uint32_t flags = 0;
         uint32_t e = ev[i].events;
+        int rfd = ev[i].data.fd; /* the ready DESCRIPTOR (not token bits) */
 
-        if (ev[i].data.fd == p->wfd) {
+        if (rfd == p->wfd) {
             uint64_t drain;
 
             /* Wake eventfd: consume its counter so the stickiness is one
-             * wait, then continue collecting real events below. */
+             * wait, then continue collecting real events below. The wake
+             * fd is never in the token table, so this compare is exact. */
             (void)!read(p->wfd, &drain, sizeof(drain));
             continue;
         }
@@ -242,8 +291,15 @@ int mjs_epoll_wait(mjs_epoller *p, mjs_poll_event *events, unsigned cap,
         if ((e & EPOLLERR) != 0u)
             flags |= MJS_POLL_ERROR;
 
-        events[filled].token = ev[i].data.u64;
-        events[filled].fd = ev[i].data.fd;
+        /* epoll returns ONE 64-bit data field holding the fd; recover the
+         * fd's token from the per-fd table before emitting. */
+        {
+            unsigned slot = mjs_epoll_slot(p, rfd);
+            if (p->table_fd[slot] != rfd)
+                continue; /* raced: registration dropped mid-wait */
+            events[filled].token = p->table_tok[slot];
+        }
+        events[filled].fd = rfd;
         events[filled].events = flags;
         filled++;
     }
