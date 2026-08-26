@@ -1,30 +1,24 @@
 #!/bin/sh
-# mojito-sys S2.4 — NativeTlsKey conformance lane (issue #51).
+# mojito-sys S2.7 — §38.5 TLS conformance runner (issue #54).
 #
-# Runs the §38.5 TLS conformance (tls_test.mojo) against the packaged
-# libmojito_sys.dylib (frozen mjs_tls_* ABI) AND libmojito_spike.dylib
-# (synthetic context-switch pair reused for the §38.5 switch-continuity
-# check), under the repo-root package layout:
-#   - distinct nonzero keys; set/get round-trip + overwrite;
-#   - two-key isolation on one thread;
-#   - per-thread isolation over a spawned pthread + destructor-exactly-once
-#     (the NativeThread.spawn-driven legs live in tests/s2/conformance/tls,
-#     issue #54);
-#   - invalid-key / use-after-destroy decoded -EINVAL;
-#   - same value retained across a synthetic context switch.
+# Per-lane runner invoked by the canonical tests/s2/conformance/run.sh
+# aggregator. Runs tls/conformance.mojo against libmojito_sys.dylib AND
+# libmojito_spike.dylib (synthetic context-switch pair reused for the
+# §38.5 switch-continuity check), mirroring tests/s2/thread/run_tls.sh.
+# Prints '<name> PASS/FAIL' plus a RESULT line:
+#     RESULT: all green | RESULT: FAILED
 #
-# Usage: tests/s2/thread/run.sh     MOJO=/path/to/mojo CC=<cc>
-#   Expects to be run from a checkout where `make` works at the repo root.
+# Usage: tests/s2/conformance/tls/run.sh   MOJO=/path/to/mojo
 
 set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../../.." && pwd)
 MOJO=${MOJO:-mojo}
 BUILD_DIR="$SCRIPT_DIR/.build"
 
-TEST_FILE="$SCRIPT_DIR/tls_test.mojo"
-TEST_NAME="s2-tls-mojo"
+TEST_FILE="$SCRIPT_DIR/conformance.mojo"
+TEST_NAME="s2-conformance-tls"
 
 if ! command -v "$MOJO" >/dev/null 2>&1; then
     echo "ERROR: mojo not found on PATH; set MOJO=<path-to-mojo>"
@@ -45,7 +39,7 @@ if ! make -C "$REPO_ROOT" libmojito_sys.dylib libmojito_spike.dylib \
 fi
 
 # The b2 toolchain intermittently segfaults while lowering modules that mix
-# @extern bindings with raising code (precedent: tests/s1/memory/vm/run.sh);
+# @extern bindings with raising code (precedent: tests/s2/thread/run_tls.sh);
 # retry a bounded number of times, keeping the last output.
 status=2
 out=""
@@ -63,10 +57,10 @@ while [ $status -ne 0 ] && [ $attempt -lt 3 ]; do
     fi
 done
 
-matrix=""
 echo "== $TEST_NAME"
 printf '%s\n' "$out" | sed 's/^/   | /'
 
+matrix=""
 if [ $status -eq 0 ] && printf '%s' "$out" | grep -q "RESULT: all green"; then
     matrix="$TEST_NAME PASS
 "
@@ -76,12 +70,13 @@ else
 fi
 
 echo ""
-echo "S2 thread NativeTlsKey conformance matrix (issue #51)"
+echo "S2.7 TLS conformance matrix (issue #54)"
 printf '%s' "$matrix" | sed 's/^/  /'
-if [ "$matrix" = "$TEST_NAME FAIL
-" ]; then
-    echo "RESULT: FAILED"
-    exit 1
-fi
+case "$matrix" in
+    *"FAIL"*)
+        echo "RESULT: FAILED"
+        exit 1
+        ;;
+esac
 echo "RESULT: all green"
 exit 0
