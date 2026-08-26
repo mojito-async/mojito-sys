@@ -526,8 +526,21 @@ int mjs_event_destroy(mjs_event **e);
 /* --- s5-ctx --- */
 /*
  * S5.1 native contexts (issue #64, spec §20.2): stackful cooperative
- * contexts switched at the callee-saved register level. Same additive-
- * only regime as every block above; MOJITO_SYS_ABI_VERSION stays 1.
+ * contexts switched at the callee-saved register level.
+ *
+ * VERSION-3 AMENDMENT (#66): this block is NOT the frozen v2 ABI
+ * anymore. The lifecycle fold grows the caller-owned record additively
+ * from the frozen 168-byte v2 save-area to 200 bytes — a 4-slot v3
+ * lifecycle TAIL (state/ret_to/finish_cb/reserved) appended AFTER the
+ * frozen v2 prefix. Every v2 byte offset and per-field contract stays
+ * prefix-stable, so consumers that read/write only the v2 save area
+ * keep working. BUT the record is now 200 bytes and the library writes
+ * its v3 tail UNCONDITIONALLY on every init/capture/switch/finish.
+ * Callers MUST therefore provide ms_context_size() (= 200) bytes of
+ * storage. A consumer that hardcoded the v2 literal 168 and hands the
+ * library a 168-byte buffer risks a 32-byte out-of-bounds WRITE that C
+ * cannot detect (no size travels with the raw ms_context *). Never
+ * embed the size as a literal — always bind it from ms_context_size().
  *
  * Return-value contract: ms_context_init is the ONLY errno-style entry
  * point in this block (0 == success; negative == -errno). It takes no
@@ -595,8 +608,11 @@ typedef void (*ms_context_finish_fn)(void *userdata);
  * Compile-time constants surfaced as functions so consumers can bind
  * them without knowing the backend. Since #66 the record carries a
  * per-context lifecycle tail after the frozen v2 prefix: size == 200,
- * alignment == 8 (v2 consumers that sized storage via this getter are
- * unaffected; nothing reads or writes the tail beyond its own record). */
+ * alignment == 8 (the caller MUST allocate exactly ms_context_size()
+ * bytes; the v3 tail is written unconditionally. A consumer that
+ * hardcoded the v2 literal 168 into its buffer size would let that
+ * 32-byte tail write out of bounds — C cannot detect a buffer too
+ * small, so bind the size from this getter, never from a literal). */
 size_t ms_context_size(void);
 size_t ms_context_alignment(void);
 
