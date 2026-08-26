@@ -14,9 +14,10 @@
 #   * the token projects to two raw machine words (addr, userdata) matching
 #     m2i_callback_token and reassembles without loss (H3).
 #
-# Until the build-lane header merges, the layout is pinned in-Mojo by the
-# two-word projection above rather than an @extern sink; the conformance
-# stays green against the in-Mojo shape.
+# Since #43, the native layout sink exists: driver.c (same directory,
+# linked by run.sh) static-asserts sizeof(mjs_callback_token)==16 with
+# addr at 0 / userdata at 8, and drives C-to-Mojo invokes through the
+# T2 sections below.
 #
 # b2 COMPILE-CAPABILITY NOTE: `UnsafePointer[...]` is non-nullable in
 # 1.0.0b2 — a literal `unsafe_from_address=0` is a compile error. Null
@@ -24,7 +25,7 @@
 # runtime-sourced zero), never a literal zero. Verified: literal zero is
 # rejected; runtime/comptime zero compiles.
 
-from std.memory import UnsafePointer
+from std.memory import UnsafePointer, stack_allocation
 from std.sys.intrinsics import inlined_assembly
 from mojito_sys.abi.callbacks import (
     BytePtr,
@@ -40,6 +41,38 @@ comptime TAG_ADDR: Int = 0x1234
 @export("cb_target")
 def cb_target(userdata: UserdataPtr) abi("C"):
     pass
+
+
+# --- S1.10 (#43): C-to-Mojo invoke conformance ------------------------------
+#
+# The native half (driver.c, same directory) is linked into this executable
+# by run.sh via -Xlinker. It receives the two-word token projected below,
+# casts the addr slot to ms_callback and invokes INTO this module's
+# @export abi("C") callback, which writes SENTINEL through the opaque
+# userdata pointer.
+
+comptime SENTINEL: Int = 0x5E17A1C0
+
+
+@export("cbdrv_sentinel")
+def cbdrv_sentinel(userdata: UserdataPtr) abi("C"):
+    # C driver invokes us as `void (*)(void *)`: write through userdata.
+    (userdata.bitcast[Int]())[] = SENTINEL
+
+
+# Driver entry points (driver.c); linked via -Xlinker, resolved at static
+# link time. Raw addresses handed to / received from C use MutAnyOrigin.
+comptime DrvTokenPtr = UnsafePointer[Byte, MutAnyOrigin]
+
+
+@extern("cbdrv_invoke")
+def cbdrv_invoke(token: DrvTokenPtr) abi("C") -> Int32:
+    ...
+
+
+@extern("cbdrv_invoke_corrupt")
+def cbdrv_invoke_corrupt(token: DrvTokenPtr, mode: Int32) abi("C") -> Int32:
+    ...
 
 
 # Spike's entry_pointer: materialize the machine address of an @export
@@ -144,9 +177,74 @@ def main() raises:
             + ")"
         )
 
+    var t1_ok = ok
     print(
-        "S1-ABI-CALLBACKS-T1 conformance: "
-        + ("PASS" if ok else "FAIL (" + reason + ")")
+        "S1-ABI-CALLBACKS-T1 token conformance: "
+        + ("PASS" if t1_ok else "FAIL (" + reason + ")")
     )
-    if not ok:
-        raise Error("S1-ABI-CALLBACKS-T1 failed: " + reason)
+
+    # === T2 (#43): C-to-Mojo invoke through the frozen layout ================
+
+    # Live callback address + sentinel cell, projected to the two C words.
+    var cell = stack_allocation[1, Int]()
+    cell[] = 0
+    var cb_code = entry_pointer["cbdrv_sentinel"]()
+    var live_ud = UserdataPtr(unsafe_from_address=Int(cell))
+    var tok = CallbackToken.from_code_pointer(cb_code, live_ud)
+    var words = stack_allocation[2, Int]()
+    words[0] = Int(tok.addr)
+    words[1] = Int(tok.userdata)
+
+    # T2a: positive invoke — C casts word0 to ms_callback and calls; the
+    # Mojo callback writes SENTINEL through the userdata pointer.
+    var rc = Int(cbdrv_invoke(words.bitcast[Byte]()))
+    var t2a_ok = rc == 0 and cell[] == SENTINEL
+    if not t2a_ok:
+        print(
+            "  + invoke rc="
+            + String(rc)
+            + " sentinel="
+            + String(cell[])
+        )
+    print(
+        "S1-ABI-CALLBACKS-T2a C->Mojo invoke delivers sentinel: "
+        + ("PASS" if t2a_ok else "FAIL")
+    )
+
+    # Token immutability: the driver must not disturb either slot.
+    var imm_ok = words[0] == Int(tok.addr) and words[1] == Int(tok.userdata)
+    print(
+        "S1-ABI-CALLBACKS-T2b driver leaves token untouched: "
+        + ("PASS" if imm_ok else "FAIL")
+    )
+
+    # T2c: corrupted addr slot (NULL) — deterministic refusal (rc=1), no
+    # crash, no invocation: nullity is addr-nullity.
+    cell[] = 0
+    rc = Int(cbdrv_invoke_corrupt(words.bitcast[Byte](), Int32(0)))
+    var t2c_ok = rc == 1 and cell[] == 0
+    if not t2c_ok:
+        print("  + corrupt(NULL) rc=" + String(rc) + " sentinel=" + String(cell[]))
+    print(
+        "S1-ABI-CALLBACKS-T2c corrupted-NULL addr refused deterministically: "
+        + ("PASS" if t2c_ok else "FAIL")
+    )
+
+    # T2d: corrupted addr slot (valid-but-wrong code) — dispatch returns
+    # normally, sentinel stays absent: a deterministic FAIL surface, not a
+    # crash.
+    rc = Int(cbdrv_invoke_corrupt(words.bitcast[Byte](), Int32(1)))
+    var t2d_ok = rc == 0 and cell[] == 0
+    if not t2d_ok:
+        print("  + corrupt(benign) rc=" + String(rc) + " sentinel=" + String(cell[]))
+    print(
+        "S1-ABI-CALLBACKS-T2d corrupted-wrong addr fails deterministically: "
+        + ("PASS" if t2d_ok else "FAIL")
+    )
+
+    var all_ok = (
+        t1_ok and t2a_ok and imm_ok and t2c_ok and t2d_ok
+    )
+    print("RESULT: " + ("all green" if all_ok else "FAILED"))
+    if not all_ok:
+        raise Error("S1-ABI-CALLBACKS conformance failed")

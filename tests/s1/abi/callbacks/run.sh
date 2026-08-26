@@ -1,25 +1,58 @@
 #!/bin/sh
-# mojito-sys S1 — ABI — callback token conformance harness (issue #32).
+# mojito-sys S1 — ABI — callback token conformance harness (issues #32, #43).
 #
-# Runs the callback-token conformance test and prints a PASS/FAIL matrix.
-# Exits nonzero on failure or missing prerequisites.
+# Two halves, one process (tests/s1/memory/stack lane pattern):
+#   1. nullity pin — a literal `unsafe_from_address=0` must stay a compile
+#      error (b2 non-nullable UnsafePointer; CallbackToken.unset() is the
+#      only supported null-construction path);
+#   2. conformance driver — driver.c is compiled ad hoc (NOT part of
+#      libmojito_sys; no new exported symbols) and linked into the
+#      AOT-built conformance_test executable via -Xlinker. The C half pins
+#      the frozen mjs_callback_token layout as compile-time asserts and
+#      invokes INTO Mojo's @export abi("C") callback through the token;
+#      Mojo asserts the sentinel arrived (issue #43).
+#
+# Prints a PASS/FAIL matrix and RESULT line; exits nonzero on failure or
+# missing prerequisites.
+#
+# Portability: cc flags are uname-derived (no -arch flag); the dylib path
+# is anchored at REPO_ROOT with the suffix chosen from uname -s.
 #
 # Usage: tests/s1/abi/callbacks/run.sh
-#   MOJO=/path/to/mojo overrides the compiler.
+#   MOJO=/path/to/mojo CC=/path/to/cc override the toolchain.
 
 set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../../.." && pwd)
 MOJO=${MOJO:-mojo}
+CC=${CC:-cc}
+OUT="$SCRIPT_DIR/.build"
 
-TESTS="conformance_test"
+case "$(uname -s)" in
+    Darwin)
+        SOEXT=dylib
+        LD_ENV=DYLD_LIBRARY_PATH
+        ;;
+    *)
+        SOEXT=so
+        LD_ENV=LD_LIBRARY_PATH
+        ;;
+esac
+DYLIB="$REPO_ROOT/libmojito_sys.$SOEXT"
+
+TEST_NAME="s1_abi_callbacks"
+DRIVER="$OUT/driver.o"
+BIN="$OUT/conformance_test"
 
 if ! command -v "$MOJO" >/dev/null 2>&1; then
     echo "ERROR: mojo not found on PATH; set MOJO=<path-to-mojo>"
-    for t in $TESTS; do
-        echo "$t FAIL (toolchain unavailable)"
-    done
+    echo "$TEST_NAME FAIL (toolchain unavailable)"
+    exit 2
+fi
+if ! command -v "$CC" >/dev/null 2>&1; then
+    echo "ERROR: $CC not found; set CC=<compiler>"
+    echo "$TEST_NAME FAIL (toolchain unavailable)"
     exit 2
 fi
 
@@ -29,20 +62,18 @@ fi
 # instead of a silent "cannot resolve package" import error.
 if [ ! -d "$REPO_ROOT/mojito_sys" ]; then
     echo "ERROR: $REPO_ROOT/mojito_sys missing; S1Build package scaffold not merged yet."
-    for t in $TESTS; do
-        echo "$t FAIL (package scaffold absent)"
-    done
+    echo "$TEST_NAME FAIL (package scaffold absent)"
     exit 1
 fi
+
+mkdir -p "$OUT"
 
 failures=0
 matrix=""
 
-# H2 pin (issue #32): b2's UnsafePointer is non-nullable — a literal
-# `unsafe_from_address=0` MUST stay a compile error. CallbackToken.unset()
-# is the only supported null-construction path; this fails fast if a
-# future toolchain ever accepts the literal, silently reopening a second
-# null path beside the factory.
+echo "== $TEST_NAME (issues #32/#43)"
+
+# --- 1. H2 pin (issue #32): b2's UnsafePointer is non-nullable ---------------
 pin=$(mktemp "${TMPDIR:-/tmp}/mjs_null_pin.XXXXXX.mojo")
 trap 'rm -f "$pin"' EXIT
 cat > "$pin" <<'EOF'
@@ -54,33 +85,67 @@ def main():
 EOF
 if "$MOJO" run -I "$REPO_ROOT" "$pin" >/dev/null 2>&1; then
     echo "ERROR: nullability contract broken: literal unsafe_from_address=0 compiled"
-    for t in $TESTS; do
-        echo "$t FAIL (nullability pin)"
-    done
-    exit 3
+    matrix="${matrix}nullability-pin FAIL
+"
+    failures=$((failures + 1))
+else
+    matrix="${matrix}nullability-pin PASS
+"
 fi
-for t in $TESTS; do
-    file="$SCRIPT_DIR/$t.mojo"
-    out=$("$MOJO" run -I "$REPO_ROOT" "$file" 2>&1)
-    status=$?
-    # A passing run prints a PASS line; compilation/import failure reports FAIL.
-    if [ $status -eq 0 ] && printf '%s' "$out" | grep -q "PASS"; then
-        row="$t PASS"
+
+# --- 2. Native half: ad hoc object, frozen-layout static asserts live here ---
+# Host-toolchain flags only: no -arch, target follows uname-derived host.
+if ! "$CC" -O2 -g -Wall -Wextra -I"$REPO_ROOT/native/include" \
+        -c "$SCRIPT_DIR/driver.c" -o "$DRIVER" 2>"$OUT/driver.build.log"; then
+    echo "driver-build FAIL"
+    tail -n 8 "$OUT/driver.build.log" | sed 's/^/    | /'
+    matrix="${matrix}driver-build FAIL
+"
+    echo ""
+    echo "S1 abi/callbacks conformance matrix (issues #32/#43)"
+    printf '%s' "$matrix" | sed 's/^/  /'
+    echo "RESULT: 1 FAILED"
+    exit 1
+fi
+matrix="${matrix}driver-build PASS
+"
+
+# --- 3. Mojo half AOT-built against the driver object ------------------------
+# The packaged dylib is linked when present so the executable also pins its
+# load shape; the callbacks module itself imports no mjs_* symbol, so its
+# absence is not an error for this suite.
+LINK_ARGS=""
+if [ -f "$DYLIB" ]; then
+    LINK_ARGS="-Xlinker $DYLIB"
+fi
+if ! "$MOJO" build "$SCRIPT_DIR/conformance_test.mojo" -o "$BIN" \
+        -I "$REPO_ROOT" \
+        -Xlinker "$DRIVER" $LINK_ARGS \
+        2>"$OUT/conformance_test.build.log"; then
+    echo "conformance-test RED (driver build failed)"
+    tail -n 8 "$OUT/conformance_test.build.log" | sed 's/^/    | /'
+    matrix="${matrix}conformance-test FAIL
+"
+    failures=$((failures + 1))
+else
+    out=$(env "$LD_ENV=$REPO_ROOT" "$BIN" 2>&1)
+    st=$?
+    printf '%s\n' "$out" | sed 's/^/   | /'
+    if [ $st -eq 0 ] && printf '%s' "$out" | grep -q "RESULT: all green"; then
+        matrix="${matrix}conformance-test PASS
+"
     else
-        row="$t FAIL"
+        matrix="${matrix}conformance-test FAIL
+"
         failures=$((failures + 1))
     fi
-    matrix="$matrix$row
-"
-    echo "== $t"
-    printf '%s\n' "$out" | tail -n 8 | sed 's/^/   | /'
-done
+fi
 
 echo ""
-echo "S1 abi/callbacks conformance matrix (issue #32)"
-echo "$matrix" | sed 's/^/  /'
+echo "S1 abi/callbacks conformance matrix (issues #32/#43)"
+printf '%s' "$matrix" | sed 's/^/  /'
 if [ "$failures" -ne 0 ]; then
-    echo "RESULT: $failures/1 FAILED"
+    echo "RESULT: $failures FAILED"
     exit 1
 fi
 echo "RESULT: all green"
