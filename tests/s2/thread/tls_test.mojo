@@ -16,11 +16,9 @@
 #   7. switch-continuity    — SAME value retained across a synthetic context
 #     switch (spike switch pair, spec L1851/L1860).
 #
-# Thread spawning: TODO(#54) — drive the isolation legs through
-# NativeThread.spawn once the S2.1 thread wrapper (#48) lands; until then the
-# raw-pthread C smoke pattern (tests/s2/native/tls_smoke.c) is re-created
-# here with @extern pthread_create/pthread_join bindings and an @export
-# worker entry addressed via the spike entry_pointer mechanism.
+# Thread spawning: the NativeThread-driven isolation/reuse/destructor legs
+# now live in tests/s2/conformance/tls/conformance.mojo (issue #54); this
+# suite keeps its raw-pthread worker as an independent C-ABI cross-check.
 #
 # b2 notes (repo conventions):
 #   - Null pointers come from a RUNTIME zero (`unsafe_from_address=0` literal
@@ -122,7 +120,8 @@ struct WorkerArg:
 # Worker body: bind THIS thread's value under the shared key, read it back,
 # record both. Deliberately allocation-free and raise-free — raw ABI calls +
 # plain memory writes only (mirrors the C smoke worker).
-# TODO(#54): become a NativeThread.spawn closure when S2.1 lands.
+# The NativeThread.spawn variant of this worker lives in
+# tests/s2/conformance/tls/conformance.mojo (issue #54).
 @export("s24_tls_worker_entry")
 def tls_worker_entry(ud: BytePtr) abi("C"):
     var wa = ud.bitcast[WorkerArg]()
@@ -147,7 +146,8 @@ def switch_alt(ud: BytePtr) abi("C"):
     ms_ctx_switch(fp[].self_ctx, fp[].back_ctx)
 
 
-# Raw pthread spawn plumbing (TODO(#54) — replaced by mojito_sys.thread):
+# Raw pthread spawn plumbing (independent C-ABI cross-check; the
+# mojito_sys.thread-driven variant is tests/s2/conformance/tls, issue #54):
 # pthread_t travels as one word-sized slot; attr/retval may be NULL.
 @extern("pthread_create")
 def _pthread_create(
