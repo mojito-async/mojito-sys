@@ -35,3 +35,9 @@ mjs_mutex_lock
 mjs_mutex_try_lock
 mjs_mutex_unlock
 mjs_mutex_destroy
+mjs_condvar_init
+mjs_condvar_wait
+mjs_condvar_wait_until
+mjs_condvar_signal
+mjs_condvar_broadcast
+mjs_condvar_destroy

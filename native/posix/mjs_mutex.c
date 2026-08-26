@@ -21,9 +21,10 @@
 #include <errno.h>
 #include <stdlib.h>
 
-struct mjs_mutex {
-    pthread_mutex_t pm;
-};
+/* Struct layout lives in the PRIVATE internal header shared with the
+ * s3-condvar layer (mjs_condvar_wait passes &m->pm into pthread_cond_*);
+ * the public ABI in ../include/mojito_sys.h stays opaque. */
+#include "mjs_sync_internal.h"
 
 int mjs_mutex_init(mjs_mutex **out) {
     if (out == NULL)
