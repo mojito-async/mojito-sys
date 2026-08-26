@@ -18,10 +18,21 @@
 # from there purely for test hygiene; NativeIoHandle itself never closes.
 
 from mojito_sys.abi.handles import ms_close
-from mojito_sys.io.handle import NativeIoHandle
+from mojito_sys.io.handle import NativeIoHandle, NO_FD
 
-comptime F_DUPFD: Int32 = 0
 comptime F_GETFD: Int32 = 1
+
+# Probe descriptor slots are HIGH and FIXED per test (101..): the suite is
+# single-threaded and owns nothing below 100, so lowest-free-slot reuse
+# tricks are unnecessary here.
+comptime T1_SLOT: Int32 = 101
+comptime T2_SLOT: Int32 = 102
+comptime T3_SLOT: Int32 = 103
+
+
+@extern("dup2")
+def ms_dup2(oldfd: Int32, newfd: Int32) abi("C") -> Int32:
+    ...
 
 
 @extern("fcntl")
@@ -29,9 +40,17 @@ def ms_fcntl(fd: Int32, cmd: Int32, arg: Int32) abi("C") -> Int32:
     ...
 
 
-# Real open descriptor via the C ABI (lowest-free allocation).
-def fresh_fd() -> Int32:
-    return ms_fcntl(0, F_DUPFD, 0)
+# A real open descriptor: duplicate stdin onto the caller's fixed high slot.
+# fcntl(F_DUPFD) is avoided DELIBERATELY: observed mojo 1.0.0b2 miscompiles
+# early variadic F_DUPFD call sites (-1 regardless of argument validity)
+# depending on surrounding code shape; dup2 is position-independent.
+# NOTE: dup2(2) returns NEWFD on success — not 0 — so the success check
+# compares against the slot itself.
+def fresh_fd(slot: Int32) -> Int32:
+    var rc = ms_dup2(0, slot)
+    if rc == slot:
+        return slot
+    return -1
 
 
 # True when `fd` is currently open (no close() consumed this descriptor).
@@ -44,7 +63,7 @@ def is_open(fd: Int32) -> Bool:
 # back; the null/default sentinel is NOT valid.
 # ----------------------------------------------------------------------------
 def t1_raw_value_roundtrip() -> Bool:
-    var raw = fresh_fd()
+    var raw = fresh_fd(T1_SLOT)
     var h = NativeIoHandle(raw)
     var roundtrip = (h.get() == raw) and h.is_valid()
     var default_invalid = not NativeIoHandle().is_valid()
@@ -63,7 +82,7 @@ def borrow_and_drop(raw: Int32) -> Bool:
 
 
 def t2_borrow_never_closes() -> Bool:
-    var raw = fresh_fd()
+    var raw = fresh_fd(T2_SLOT)
     var alive_in_frame = borrow_and_drop(raw)
     var still_open_after = is_open(raw)
     _ = ms_close(raw)  # test hygiene.
@@ -71,20 +90,26 @@ def t2_borrow_never_closes() -> Bool:
 
 
 # ----------------------------------------------------------------------------
-# T3 — move transfers, moved-from detectable: after `dst = src^`, dst keeps
-# the exact raw value while src drops to the NO_FD sentinel (is_valid() ==
-# False, get() == NO_FD) — the debug-detectable invalid state.  A move of the
-# non-owning value type closes nothing.
+# T3 — move transfers, moved-from detectable.  Two flavors of transfer:
+#   a) `dst = src^` — the compiler-enforced move: dst keeps the exact raw
+#      value (the source is rejected as uninitialized afterwards, which is
+#      itself the strongest form of moved-from detection).
+#   b) `dst = src.take()` — move-out that leaves the source initialized but
+#      invalid: src.is_valid() == False and get() == NO_FD, the
+#      debug-detectable sentinel state.
+# Neither flavor closes the underlying descriptor.
 # ----------------------------------------------------------------------------
 def t3_move_transfers_moved_from_detectable() -> Bool:
-    var raw = fresh_fd()
+    var raw = fresh_fd(T3_SLOT)
     var src = NativeIoHandle(raw)
-    var dst = src^  # move: ownership of the token transfers, src is moved-from.
-    var ok_dst = dst.is_valid() and (dst.get() == raw)
-    var ok_src = (not src.is_valid()) and (src.get() == NativeIoHandle.NO_FD)
+    var moved = src^  # compiler-enforced move: token lands in `moved`.
+    var ok_moved = moved.is_valid() and (moved.get() == raw)
+    var holder = NativeIoHandle(raw)
+    var ok_taken = holder.take().get() == raw
+    var ok_src = (not holder.is_valid()) and (holder.get() == NO_FD)
     var no_close_on_move = is_open(raw)
     _ = ms_close(raw)  # test hygiene.
-    return ok_dst and ok_src and no_close_on_move
+    return ok_moved and ok_taken and ok_src and no_close_on_move
 
 
 # ---------------------------------------------------------------------------
