@@ -121,7 +121,7 @@ def entry_pointer[symbol_name: String]() -> CThreadEntry:
         "add ${0:x}, ${0:x}, _" + symbol_name + "@PAGEOFF\n"
     )
     var addr = inlined_assembly[asm_str, UInt, constraints="=r"]()
-    return UnsafePointer[NoneType, MutAnyOrigin](unsafe_from_address=Int(addr))
+    return CThreadEntry(unsafe_from_address=Int(addr))
 
 
 # Byte-wise NUL-terminated comparison over two raw char buffers.
@@ -138,6 +138,12 @@ def _bytes_eq(
         i += 1
 
 
+# True iff haystack contains needle (String.find returns -1 on miss) —
+# same test-local helper as tests/s1/memory/vm/vm_test.mojo.
+def contains(haystack: String, needle: String) -> Bool:
+    return haystack.find(needle) != -1
+
+
 # Prints the verdict row only; main() accumulates failures locally (b2
 # forbids module-level mutable globals).
 def check(name: String, ok: Bool) -> Bool:
@@ -151,7 +157,7 @@ def check(name: String, ok: Bool) -> Bool:
 def main() raises:
     var failed = 0
     var cells = stack_allocation[8, Int64]()
-    var ud = cells.bitcast[UserdataPtr]()
+    var ud = cells  # userdata view: UnsafePointer[Int64] == UserdataPtr
     var counter_ptr = entry_pointer["mjs_tst_counter_entry"]()
     var status_ptr = entry_pointer["mjs_tst_status_entry"]()
     var sleep_ptr = entry_pointer["mjs_tst_sleep_entry"]()
@@ -164,7 +170,7 @@ def main() raises:
     while k < 3:
         var t = spawn_native_thread(counter_ptr, ud, ThreadOptions())
         var st = t.join()
-        if st != 0 or cells[0] != k + 1:
+        if st != 0 or cells[0] != Int64(k + 1):
             spawned_ok = False
         k += 1
     if not check(
@@ -206,7 +212,7 @@ def main() raises:
     var exp_buf = stack_allocation[16, Byte]()
     var exp_src = expected.unsafe_ptr()
     var ei = 0
-    while ei <= len(expected):
+    while ei <= expected.byte_length():
         exp_buf[ei] = exp_src[ei]
         ei += 1
     if not check(
@@ -231,7 +237,7 @@ def main() raises:
 
     # ---- 5c. default options (NULL name path) spawn cleanly ------------------
     cells[0] = 0
-    var t_def = spawn_native_thread(counter_ptr, ud)
+    var t_def = spawn_native_thread(counter_ptr, ud, ThreadOptions())
     var dst = t_def.join()
     if not check("T2.2 default-options spawn (NULL name)", dst == 0 and cells[0] == 1):
         failed += 1
@@ -255,7 +261,7 @@ def main() raises:
     t4.detach()
     # Consume semantics: detach NULLed the C-side *t; the wrapper mirrored it.
     var consume_ok = t4.consumed
-    consume_ok = consume_ok and (Int(t4.handle) == 0)
+    consume_ok = consume_ok and (t4.handle == 0)
     var d2_ok = True
     try:
         t4.detach()
@@ -279,16 +285,16 @@ def main() raises:
     var cyc_fail = 0
     var c = 0
     while c < 50:
-        var t = spawn_native_thread(counter_ptr, ud)
+        var t = spawn_native_thread(counter_ptr, ud, ThreadOptions())
         var st = t.join()
-        if st != 0 or cells[0] != c + 1:
+        if st != 0 or cells[0] != Int64(c + 1):
             cyc_fail += 1
         c += 1
     var dc = 0
     while dc < 50:
         # Instant-exit entries: detach may land before OR after the child's
         # exit — both orders are deterministic, error-free paths in C.
-        var t = spawn_native_thread(counter_ptr, ud)
+        var t = spawn_native_thread(counter_ptr, ud, ThreadOptions())
         t.detach()
         dc += 1
     # Drain any detached children before process exit (clean-exit guarantee).
