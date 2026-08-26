@@ -81,6 +81,7 @@ static void *stress_child(void *arg) {
 }
 
 int main(void) {
+    setbuf(stdout, NULL); /* unbuffered: verdicts survive any crash */
     /* ---- 1. roundtrip + consume ------------------------------------------------ */
     mjs_mutex *m = NULL;
     CHECK(mjs_mutex_init(&m) == 0 && m != NULL, "C init adopts handle");
@@ -89,9 +90,12 @@ int main(void) {
     CHECK(mjs_mutex_unlock(m) == 0, "C unlock");
     CHECK(mjs_mutex_try_lock(m) == 0, "C try_lock free == 0");
     CHECK(mjs_mutex_unlock(m) == 0, "C unlock (from try_lock)");
-    mjs_mutex *consumed = m;
     CHECK(mjs_mutex_destroy(&m) == 0 && m == NULL, "C destroy consumes (*m NULLed)");
-    CHECK(mjs_mutex_destroy(&consumed) == -EINVAL, "C double destroy == -EINVAL");
+    /* Consume semantics: the FIRST destroy NULLed &m. A double destroy
+     * means passing the already-NULLed slot again — deterministic
+     * -EINVAL. (Passing a stale non-NULL alias here would be genuine
+     * use-after-free, not the contracted misuse path.) */
+    CHECK(mjs_mutex_destroy(&m) == -EINVAL, "C double destroy (*m NULLed) == -EINVAL");
 
     /* ---- 2. NULL / untouched-out contract -------------------------------------- */
     mjs_mutex *keep = (mjs_mutex *)0x1;
