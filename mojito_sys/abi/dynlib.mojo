@@ -66,17 +66,6 @@ def ms_dlclose(handle: Int) abi("C") -> Int32:
 @extern("dlerror")
 def ms_dlerror() abi("C") -> Int:
     ...
-# Decode a NUL-terminated C string at `p` (0 yields the empty String).
-def _cstr(p: Int) -> String:
-    var s = String("")
-    if p == 0:
-        return s
-    var q = UnsafePointer[UInt8, MutUntrackedOrigin](unsafe_from_address=p)
-    var i = 0
-    while q[i] != 0:
-        s += chr(Int(q[i]))
-        i += 1
-    return s
 
 
 # Little-endian packed-ASCII decoder (same shape as errors.mojo's): byte 0
@@ -134,8 +123,9 @@ def _msg_disposed() -> String:
 
 # "library or symbol name exceeds 255 bytes" — deterministic NAME_MAX
 # rejection diagnostic. NOTE: b2 accepts this helper called from resolve()
-# but NOT from open_library() — there the same message is built inline
-# step-wise instead (crashes otherwise, see open_library).
+# but NOT from open_library() — raising the payload from THAT frame crashes
+# the compiler, so open_library enforces the bound through its own dedicated
+# raising frame (_reject_over_name_max) instead.
 def _msg_name_too_long() -> String:
     var s = _unpack(0x7972617262696C)
     s += _unpack(0x6D797320726F20)
@@ -170,14 +160,33 @@ def _fill(buf: UnsafePointer[Byte, MutAnyOrigin], s: String) -> Int:
 #   allocates the diagnostic String only, off any hot path.
 # Task-aware: no — an OS-blocking call; invoke from task contexts only where
 #   a blocking pause is tolerated (init/teardown).
+# Deterministic NAME_MAX rejection for open_library(): lives in ITS OWN
+# raising frame because b2 crashes when a payload built here is raised from
+# open_library()'s frame directly (helper-call or inline alike).
+def _reject_over_name_max(name: String) raises:
+    if len(name) > NAME_MAX:
+        # "library or symbol name exceeds 255 bytes"
+        var s = _unpack(0x7972617262696C)
+        s += _unpack(0x6D797320726F20)
+        s += _unpack(0x6D616E206C6F62)
+        s += _unpack(0x65656378652065)
+        s += _unpack(0x20353532207364)
+        s += _unpack(0x7365747962)
+        raise Error(s)
+
+
 def open_library(name: String, mode: Int32) raises -> DynamicLibrary:
+    # NAME_MAX guard BEFORE staging: _fill writes len(name)+1 bytes into the
+    # 256-byte stack buffer unconditionally, so a >255-byte name would
+    # overrun this frame. Same deterministic message resolve() enforces.
+    _reject_over_name_max(name)
     var buf = stack_allocation[256, Byte]()
     var h = ms_dlopen(_fill(buf, name), mode)
     if h == 0:
         # Deterministic missing-lib error: fixed prefix + the loader's own
         # dlerror text ("image not found" et al), all runtime-built.
         raise Error(_msg_open_fail(ms_dlerror()))
-    return DynamicLibrary(h)
+    return DynamicLibrary.unsafe_takeownership(h)
 
 
 # A handle over the MAIN program image itself (dlopen(NULL)), so callers can
@@ -190,8 +199,8 @@ def open_library(name: String, mode: Int32) raises -> DynamicLibrary:
 def main_library(mode: Int32) raises -> DynamicLibrary:
     var h = ms_dlopen(0, mode)
     if h == 0:
-        raise Error(_unpack(0x206E65706F6C64))
-    return DynamicLibrary(h)
+        raise Error(_msg_open_fail(ms_dlerror()))
+    return DynamicLibrary.unsafe_takeownership(h)
 
 
 # An owned handle over a dynamically loaded library. Move (`^`) transfers
@@ -201,12 +210,30 @@ struct DynamicLibrary(Movable):
     var handle: Int
     var _closed: Bool
 
-    # Wrap a raw dlopen handle (nonzero) and take close-once ownership.
+    # Default value: the null sentinel, already disposed. Deliberately the
+    # ONLY public constructor — a raw-int ctor would let callers alias one
+    # OS handle across two values that each close "exactly once"
+    # (use-after-unmap while symbols live). open_library()/main_library()
+    # are the sole paths to a live handle.
     #
     # Blocking: no. Allocation: none. Task-aware: no.
-    def __init__(out self, handle_: Int):
-        self.handle = handle_
-        self._closed = False
+    def __init__(out self):
+        self.handle = 0
+        self._closed = True
+
+    # MUST NOT be called outside mojito_sys/abi/dynlib.mojo. Escape hatch
+    # for the module's own open_library()/main_library(): adopts a raw
+    # dlopen handle and takes close-once ownership. Calling it with a handle
+    # you do not exclusively own (e.g. one already wrapped elsewhere) breaks
+    # the exactly-once close discipline — double dlclose / use-after-unmap.
+    #
+    # Blocking: no. Allocation: none. Task-aware: no.
+    @staticmethod
+    def unsafe_takeownership(handle_: Int) -> Self:
+        var lib = Self()
+        lib.handle = handle_
+        lib._closed = False
+        return lib^
 
     # True when this handle holds the null sentinel (never-opened or closed).
     #

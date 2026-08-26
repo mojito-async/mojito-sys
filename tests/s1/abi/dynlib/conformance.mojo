@@ -112,6 +112,19 @@ def run_checks() raises -> Int:
     var ok10 = dst.dispose() == 0 and dst.is_disposed()
     failures += Int(not check("D10 move transfers close-once ownership", ok10))
 
+    # D11 — batch-review H1: a >255-char name is rejected deterministically
+    # BEFORE staging (no loader traffic, no stack-buffer overrun), with the
+    # same message resolve() uses for long symbol names.
+    var long_name = String("")
+    for _ in range(300):
+        long_name += "l"
+    var ok11 = False
+    try:
+        _ = open_library(long_name, RTLD_NOW)
+    except e:
+        ok11 = contains(String(e), "exceeds 255 bytes")
+    failures += Int(not check("D11 over-NAME_MAX open raises", ok11))
+
     return failures
 
 
