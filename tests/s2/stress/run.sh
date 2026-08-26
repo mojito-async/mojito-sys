@@ -47,15 +47,16 @@ if ! command -v "$MOJO" >/dev/null 2>&1; then
 fi
 
 # Build/rebuild the packaged dylib so this suite always exercises the
-# current native sources (mjs_thread.c / mjs_tls.c included).
-if ! make -C "$REPO_ROOT" libmojito_sys.dylib >"$OUT.make.log" 2>&1; then
+# current native sources (mjs_thread.c / mjs_tls.c included). The build log
+# lives INSIDE .build/ so nothing lands in the source tree (gate Tier 0.2).
+mkdir -p "$OUT"
+MAKE_LOG="$OUT/make.log"
+if ! make -C "$REPO_ROOT" libmojito_sys.dylib >"$MAKE_LOG" 2>&1; then
     echo "ERROR: cannot build $REPO_ROOT/libmojito_sys.dylib; run \`make\` first."
-    tail -n 12 "$OUT.make.log" | sed 's/^/     | /'
+    tail -n 12 "$MAKE_LOG" | sed 's/^/     | /'
     echo "RESULT: RUN-ERROR (library not built)"
     exit 2
 fi
-
-mkdir -p "$OUT"
 
 SHIM="$OUT/atomic_shim.o"
 if ! "$CC" -O2 -g -Wall -Wextra -c "$SCRIPT_DIR/atomic_shim.c" -o "$SHIM"; then
