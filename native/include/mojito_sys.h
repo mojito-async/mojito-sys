@@ -310,6 +310,81 @@ int mjs_mutex_unlock(mjs_mutex *m);
 int mjs_mutex_destroy(mjs_mutex **m);
 
 
+/* --- s3-condvar --- */
+/*
+ * S3.2 native condition variable (issue #58, spec §16). Same return-
+ * value contract as above: 0 == success; negative == -errno; out-params
+ * UNTOUCHED on failure.
+ *
+ * Handle lifetime: mjs_condvar_init yields an owned opaque handle in
+ * *out; mjs_condvar_destroy CONSUMES it (*c is NULLed on success). Any
+ * use of a consumed or NULL handle is a deterministic -EINVAL.
+ * Destroying a condvar while threads still wait on it is a caller bug
+ * (POSIX-undefined); the caller must join its waiters first.
+ *
+ * WAITING CONTRACT (spec §16 + sync/common.mojo spurious-wakeup model):
+ *   - The caller MUST hold `m` (an mjs_mutex*) across wait/wait_until,
+ *     and re-check its predicate after EVERY return — .ok may be a
+ *     spurious wakeup by contract, never proof the condition held.
+ *   - wait_until takes an ABSOLUTE deadline in nanoseconds against the
+ *     SAME monotonic domain mjs_clock_now reports (NOT wall-clock).
+ *     CLOCK-DOMAIN MAPPING (the known trap, issue #58 CAUTION):
+ *       Linux: the condvar is initialized with
+ *       pthread_condattr_setclock(CLOCK_MONOTONIC), so deadline_ns maps
+ *       1:1 onto {sec = ns/1e9, nsec = ns%1e9} for pthread_cond_timedwait.
+ *       macOS has NO pthread_condattr_setclock; the implementation uses
+ *       pthread_cond_timedwait_relative_np with the RELATIVE remainder
+ *       (deadline_ns - mjs_clock_now()) recomputed at every call entry —
+ *       the same monotonic source, no mach timebase math duplicated.
+ *   - wait_until result convention mirrors try_lock's -EBUSY status:
+ *     0 = woken (predicate may STILL be false), -ETIMEDOUT = deadline
+ *     expired (a STATUS, not a failure), any other negative = real error.
+ *
+ * Blocking (SYS-5): wait blocks the calling OS thread until woken or
+ *   the deadline expires; signal/broadcast wake but never wait;
+ *   init/destroy block only insofar as malloc/pthread_cond_* do.
+ * Allocation (SYS-4): one fixed-size handle at init; NONE afterwards.
+ * Task-aware: no — OS-thread granularity per spec §14.
+ */
+
+/* Opaque native condition variable handle (SYS-3). */
+typedef struct mjs_condvar mjs_condvar;
+
+/* Create a condvar. On success returns 0 and stores the handle in *out;
+ * NULL out-slot is -EFAULT with *out untouched. Linux pins the internal
+ * clock to CLOCK_MONOTONIC via condattr (see block comment); macOS uses
+ * the default cond plus the relative-NP timedwait fallback. */
+int mjs_condvar_init(mjs_condvar **out);
+
+/* Block the calling OS thread until woken (spurious wakes permitted),
+ * releasing `m` atomically on sleep and reacquiring it before return.
+ * Caller MUST hold `m`; NULL handles are -EINVAL. */
+int mjs_condvar_wait(mjs_condvar *c, mjs_mutex *m);
+
+/* As wait, bounded by an ABSOLUTE monotonic deadline in ns (same domain
+ * as mjs_clock_now; see block comment for the platform mapping).
+ * Returns 0 if woken (spurious wakes possible: re-check the predicate),
+ * -ETIMEDOUT once the deadline passes, another negative on error; NULL
+ * handles are -EINVAL. A deadline already in the past returns -ETIMEDOUT
+ * without blocking. */
+int mjs_condvar_wait_until(mjs_condvar *c, mjs_mutex *m,
+                           uint64_t deadline_ns);
+
+/* Wake at most one thread currently blocked in wait/wait_until on `c`
+ * (a no-op when none wait). Non-blocking (SYS-5); NULL handle -EINVAL. */
+int mjs_condvar_signal(mjs_condvar *c);
+
+/* Wake ALL threads currently blocked in wait/wait_until on `c`.
+ * Non-blocking (SYS-5); NULL handle -EINVAL. */
+int mjs_condvar_broadcast(mjs_condvar *c);
+
+/* Destroy the condvar and free its handle: *c is NULLed on success, so
+ * any later use (including a second destroy) is a deterministic
+ * -EINVAL. On failure the handle is NOT consumed. NULL or NULLed *c is
+ * -EINVAL. */
+int mjs_condvar_destroy(mjs_condvar **c);
+
+
 #ifdef __cplusplus
 }
 #endif
