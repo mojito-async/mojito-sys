@@ -7,6 +7,7 @@ infrastructure — NOT application task synchronization.
 Spec surfaces bound to frozen C ABI blocks in native/include/mojito_sys.h:
   - mojito_sys.sync.common       WaitStatus shared result enum   (S3.1, #57)
   - mojito_sys.sync.mutex        NativeMutex                    (S3.1, #57)
+  - mojito_sys.sync.atomic_wait  u32 wait/wake cores            (S3.3, #59)
 
 Subpackage scaffold; wrappers live in sibling modules.
 """

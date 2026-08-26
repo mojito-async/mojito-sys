@@ -80,20 +80,24 @@ static void *waiter_main(void *arg) {
 #define PING_ROUNDS 1000
 
 typedef struct {
-    uint32_t *turn;
+    _Atomic uint32_t *turn; /* cast to plain uint32_t* at the ABI edge */
     int my_turn;
     int rounds;
 } ping_arg_t;
 
 static void *ping_main(void *arg) {
     ping_arg_t *pa = arg;
+    const uint32_t *turn = (const uint32_t *)(uintptr_t)pa->turn;
     for (int i = 0; i < pa->rounds; i++) {
         uint64_t dl = abs_deadline_ms(30000);
-        int rc = mjs_atomic_wait_on_u32(pa->turn, (uint32_t)pa->my_turn, &dl);
-        if (rc != 0 || atomic_load(pa->turn) != (uint32_t)pa->my_turn)
+        int rc = mjs_atomic_wait_on_u32(turn, (uint32_t)pa->my_turn, &dl);
+        if (rc != 0 ||
+            atomic_load_explicit(pa->turn, memory_order_acquire) !=
+                (uint32_t)pa->my_turn)
             return (void *)(intptr_t)-1;
-        atomic_store(pa->turn, (uint32_t)(1 - pa->my_turn));
-        if (mjs_atomic_wake_one_u32(pa->turn) < 0)
+        atomic_store_explicit(
+            pa->turn, (uint32_t)(1 - pa->my_turn), memory_order_release);
+        if (mjs_atomic_wake_one_u32((uint32_t *)(uintptr_t)pa->turn) < 0)
             return (void *)(intptr_t)-1;
     }
     return NULL;
@@ -218,8 +222,8 @@ int main(void) {
           "C wake_all with N parked waiters == exactly N");
 
     /* ---- 8. cross-thread ping-pong, deadline-guarded --------------------------------------- */
-    static atomic_int turn;
-    atomic_store(&turn, 0);
+    static _Atomic uint32_t turn;
+    atomic_store_explicit(&turn, 0, memory_order_relaxed);
     ping_arg_t pa[2] = {{&turn, 0, PING_ROUNDS}, {&turn, 1, PING_ROUNDS}};
     pthread_t pt[2];
     int pp_spawned =
@@ -229,7 +233,7 @@ int main(void) {
     int pp_joined = pp_spawned && pthread_join(pt[0], &r0) == 0 &&
                     pthread_join(pt[1], &r1) == 0;
     CHECK(pp_spawned && pp_joined && r0 == NULL && r1 == NULL &&
-              atomic_load(&turn) == 0,
+              atomic_load_explicit(&turn, memory_order_acquire) == 0,
           "C ping-pong 1000 x 1000 rounds, zero hangs");
 
     if (failures == 0) {
