@@ -30,3 +30,8 @@ mjs_cpu_physical
 mjs_cpu_affinity_set_current
 mjs_clock_now
 mjs_clock_resolution
+mjs_mutex_init
+mjs_mutex_lock
+mjs_mutex_try_lock
+mjs_mutex_unlock
+mjs_mutex_destroy

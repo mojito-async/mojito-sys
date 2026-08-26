@@ -60,14 +60,22 @@ comptime ITERATIONS = 10_000
 @export("mjs_s31_stress_entry")
 def _stress_entry(ud: CellsPtr) abi("C") -> Int64:
     # ud[0] = live mutex handle, ud[1] = iterations, ud[3] = counter.
+    # The wrapper's lock/unlock raise on genuine errors; a C-ABI export
+    # cannot propagate exceptions, so the (never-taken) error path is
+    # trapped and reported through the entry status instead. With a live
+    # handle neither call ever raises at runtime.
     var m = NativeMutex()
     m.handle = ud[0]
     m.destroyed = False
+    var n = Int(ud[1])
     var i = 0
-    while i < ud[1]:
-        m.lock()
-        ud[3] += 1
-        m.unlock()
+    while i < n:
+        try:
+            m.lock()
+            ud[3] += 1
+            m.unlock()
+        except:
+            return -1
         i += 1
     return 0
 
