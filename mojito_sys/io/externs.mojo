@@ -161,3 +161,113 @@ def probe_sockaddr_format4(
     addr: ByteBuf, out_buf: ByteBuf, cap: UInt64, out_len: SizeSlot
 ) -> Int32:
     return mjs_sockaddr_format4(addr, out_buf, cap, out_len)
+
+
+# ---- s6-poller bindings (issue #75) ------------------------------------------
+#
+# Same LEAF discipline as the s6-socket bindings above: raw @extern
+# declarations + non-raising probe_* shims ONLY. mojito_sys.io.platform.kqueue
+# decodes/raises after each call returns.
+#
+# SCALAR BOUNDARY NOTES (byval-poison class, b2):
+#   - `interests` crosses as Int32 (bit-preserving reinterpretation of the
+#     neutral UInt32 mask; a UInt32 scalar by value is poisoned);
+#   - `cap` crosses as Int32 for the same reason;
+#   - `token` is a plain UInt64 scalar (the socket lane proved 64-bit scalars
+#     lower cleanly);
+#   - out-slots are MutAnyOrigin pointers that pin post-call loads.
+
+# Opaque mjs_poller* C handle, carried as an untyped byte pointer.
+comptime PollerPtr = UnsafePointer[Byte, MutAnyOrigin]
+
+# mjs_poller** create/close slots.
+comptime PollerSlot = UnsafePointer[PollerPtr, MutAnyOrigin]
+
+# const uint64_t* timeout slot: NULL = infinite, *slot == 0 = immediate.
+comptime TimeoutSlot = UnsafePointer[UInt64, MutAnyOrigin]
+
+# unsigned* wait-count out-slot.
+comptime WaitCountSlot = UnsafePointer[UInt32, MutAnyOrigin]
+
+
+@extern("mjs_poller_create")
+def mjs_poller_create(out_slot: PollerSlot) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_poller_register")
+def mjs_poller_register(
+    p: PollerPtr, fd: Int32, interests: Int32, token: UInt64
+) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_poller_modify")
+def mjs_poller_modify(
+    p: PollerPtr, fd: Int32, interests: Int32, token: UInt64
+) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_poller_unregister")
+def mjs_poller_unregister(p: PollerPtr, fd: Int32) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_poller_wait")
+def mjs_poller_wait(
+    p: PollerPtr,
+    events: ByteBuf,
+    cap: Int32,
+    timeout_ns: TimeoutSlot,
+    out_n: WaitCountSlot,
+) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_poller_wake")
+def mjs_poller_wake(p: PollerPtr) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_poller_close")
+def mjs_poller_close(p: PollerSlot) abi("C") -> Int32:
+    ...
+
+
+def probe_poller_create(out_slot: PollerSlot) -> Int32:
+    return mjs_poller_create(out_slot)
+
+
+def probe_poller_register(
+    p: PollerPtr, fd: Int32, interests: Int32, token: UInt64
+) -> Int32:
+    return mjs_poller_register(p, fd, interests, token)
+
+
+def probe_poller_modify(
+    p: PollerPtr, fd: Int32, interests: Int32, token: UInt64
+) -> Int32:
+    return mjs_poller_modify(p, fd, interests, token)
+
+
+def probe_poller_unregister(p: PollerPtr, fd: Int32) -> Int32:
+    return mjs_poller_unregister(p, fd)
+
+
+def probe_poller_wait(
+    p: PollerPtr,
+    events: ByteBuf,
+    cap: Int32,
+    timeout_ns: TimeoutSlot,
+    out_n: WaitCountSlot,
+) -> Int32:
+    return mjs_poller_wait(p, events, cap, timeout_ns, out_n)
+
+
+def probe_poller_wake(p: PollerPtr) -> Int32:
+    return mjs_poller_wake(p)
+
+
+def probe_poller_close(p: PollerSlot) -> Int32:
+    return mjs_poller_close(p)

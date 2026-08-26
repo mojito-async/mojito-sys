@@ -769,6 +769,135 @@ int mjs_sockaddr_ipv4(const char *dotted, int port, mjs_sockaddr *out);
 int mjs_sockaddr_format4(const mjs_sockaddr *addr, char *out_buf,
                          size_t cap, size_t *out_len);
 
+/* --- s6-poller --- */
+/*
+ * S6.3 readiness poller (issue #75, spec §27.1/§29/§31). Same
+ * return-value contract as above: 0 == success; negative == -errno;
+ * out-params UNTOUCHED on failure.
+ *
+ * BACKEND GUARD: this block is kqueue-backed. Hosts without kqueue
+ * return EXACTLY -ENOSYS from every entry point (detect-and-exclude,
+ * mirroring the s3-atomic-wait contract); *out slots stay untouched.
+ *
+ * Interests and events travel in one neutral bitmask:
+ *   MJS_POLL_READABLE / MJS_POLL_WRITABLE are REGISTERABLE interests;
+ *   MJS_POLL_EOF / MJS_POLL_ERROR are EVENT-ONLY flags, never accepted
+ *   as interests (-EINVAL when passed to register/modify).
+ *
+ * Edge doctrine (spec §29): registrations use edge/clear semantics — a
+ * readiness transition is reported ONCE per transition; callers drain
+ * (read/write until WouldBlock) or re-arm by state change. The platform
+ * spelling (EV_CLEAR) stays BELOW this platform-neutral wrapper.
+ *
+ * Duplicate registration / modify: re-registering a live descriptor is
+ * an UPSERT — the LAST register/modify wins for BOTH interests and
+ * token (verified against darwin kevent re-add updates udata).
+ * unregister of a not-registered descriptor succeeds (0), so
+ * unregister/reuse races degrade to no-ops, never errors.
+ *
+ * Token: completely opaque upstream identity (spec §31); preserved
+ * EXACTLY through every delivered event (64-bit value travels verbatim
+ * in kevent.udata). Generation checking belongs to mojito-async.
+ *
+ * Wake: mjs_poller_wake makes at most ONE blocked wait return 0 events.
+ * A wake with NO waiter STICKS: exactly one later wait returns promptly
+ * with zero events (EVFILT_USER + EV_CLEAR; signals coalesce like the
+ * s3-event token). wake NEVER blocks (SYS-5); only wait blocks its
+ * calling OS thread, bounded by timeout_ns.
+ *
+ * wait status mapping:
+ *   0        — success; *out_n carries 0..cap events (0 == timeout);
+ *              wake deliveries NEVER occupy an out slot but DO end the
+ *              wait early (possibly with *out_n == 0);
+ *   -EINTR   — interrupted before any event: raw -EINTR, caller retries
+ *              (§38.11 interrupt/retry doctrine);
+ *   other    — genuine error, negative -errno verbatim.
+ * Events beyond cap are DROPPED (callers loop). cap == 0 is -EINVAL.
+ *
+ * EOF/error delivery: EVFILT_READ/WRITE reporting EV_EOF sets
+ * MJS_POLL_EOF; a NEGATIVE data field under EV_EOF (e.g. ECONNRESET on
+ * a reset socket) additionally sets MJS_POLL_ERROR (spec §38.7
+ * error/hangup + kqueue-specific cases).
+ *
+ * Handle lifetime: create yields an owned opaque handle in *out; close
+ * CONSUMES it (**p NULLed on success). Any use of a consumed or NULL
+ * handle is a deterministic -EINVAL. The poller is NON-OWNING: closing
+ * it never closes registered descriptors (spec §25 borrow rule).
+ * Closing a REGISTERED descriptor silently retires its knotes (kqueue
+ * close-out); no event fires, later waits simply report nothing.
+ *
+ * Blocking (SYS-5): ONLY mjs_poller_wait may block (bounded by
+ * timeout_ns when non-NULL); register/modify/unregister/wake/close
+ * never block.
+ * Allocation (SYS-4): one fixed-size handle at create; NONE afterwards
+ * (the kevent changelist lives on the C stack).
+ * Task-aware: no — OS-thread granularity per spec §14.
+ */
+
+/* Registerable interests (OR-ed). */
+#define MJS_POLL_READABLE 0x1u
+#define MJS_POLL_WRITABLE 0x2u
+
+/* Event-only flags (OR-ed into mjs_poll_event.events). */
+#define MJS_POLL_EOF      0x4u
+#define MJS_POLL_ERROR    0x8u
+
+/* One delivered readiness event. Fixed scalar layout — token@0, fd@8,
+ * events@12; 16 bytes, 8-byte alignment — so FFI consumers decode with
+ * SCALAR loads only (no aggregate reads in extern-reaching frames). */
+typedef struct mjs_poll_event {
+    uint64_t token;  /* opaque registration token, preserved exactly */
+    int32_t fd;      /* ready descriptor */
+    uint32_t events; /* MJS_POLL_* flags for THIS event */
+} mjs_poll_event;
+
+/* Opaque native poller handle (SYS-3). */
+typedef struct mjs_poller mjs_poller;
+
+/* Create a readiness poller (kqueue-backed; internal EVFILT_USER wake
+ * source pre-registered). On success returns 0 and stores the handle in
+ * *out; NULL out-slot is -EFAULT with *out untouched. Without a kqueue
+ * backend returns exactly -ENOSYS with *out untouched. */
+int mjs_poller_create(mjs_poller **out);
+
+/* Register `fd` for `interests` with opaque `token`. Re-registration of
+ * a live fd UPSERTS (last interests+token win); event-only flag bits in
+ * `interests` are -EINVAL. Non-blocking (SYS-5). */
+int mjs_poller_register(mjs_poller *p, int fd, uint32_t interests,
+                        uint64_t token);
+
+/* Modify an existing registration atomically-from-the-caller's-view:
+ * same upsert contract as register; filters dropped from `interests`
+ * are removed (a not-present filter deletes as a no-op). */
+int mjs_poller_modify(mjs_poller *p, int fd, uint32_t interests,
+                      uint64_t token);
+
+/* Remove ALL filters for `fd`. Not-registered descriptors succeed (0);
+ * only real kernel errors (-errno) fail. Non-blocking (SYS-5). */
+int mjs_poller_unregister(mjs_poller *p, int fd);
+
+/* Wait for readiness on ANY registered descriptor into `events` (up to
+ * cap entries; cap == 0 is -EINVAL). timeout_ns: NULL = block until an
+ * event/wake; *timeout_ns == 0 = non-blocking poll; otherwise relative
+ * nanoseconds. Timeout expiry is SUCCESS with *out_n == 0. Returns
+ * -EINTR raw for retry; out_n untouched on failure. Blocking (SYS-5):
+ * parks the calling OS thread per the timeout contract ONLY. */
+int mjs_poller_wait(mjs_poller *p, mjs_poll_event *events, unsigned cap,
+                    const uint64_t *timeout_ns, unsigned *out_n);
+
+/* Make at most ONE blocked wait return promptly with zero events. A
+ * wake with no waiter sticks for exactly one later wait. Coalescing:
+ * N wakes while nobody waits still release exactly ONE wait. Never
+ * blocks (SYS-5). Allocation: none. */
+int mjs_poller_wake(mjs_poller *p);
+
+/* Destroy the poller and free its handle: *p is NULLed on success, so
+ * any later use (including a second destroy) is a deterministic
+ * -EINVAL. Registered DESCRIPTORS are NOT closed. On failure the
+ * handle is NOT consumed. NULL or NULLed *p is -EINVAL. */
+int mjs_poller_close(mjs_poller **p);
+
+
 #ifdef __cplusplus
 }
 #endif
