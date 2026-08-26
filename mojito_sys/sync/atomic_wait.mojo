@@ -5,12 +5,13 @@
 #   mjs_atomic_wait_on_u32(addr, expected, deadline_ns)  — BLOCKS;
 #   mjs_atomic_wake_one_u32(addr) / mjs_atomic_wake_all_u32(addr).
 #
-# Backend map: Linux futex (FUTEX_*_PRIVATE). Windows and the macOS
-# fallback are later issues (#60 et al.); on hosts without a backend the C
-# layer returns EXACTLY -ENOSYS, so wait_on_u32 raises the decoded ENOSYS
-# deterministically (never sleeps) and wake_* surface it as a negative
-# return — the backend-parameterized suite detects this and runs its
-# unsupported-backend mode.
+# Backend map: Linux futex (FUTEX_*_PRIVATE); macOS ships the #60
+# fallback (hashed NativeMutex+NativeCondVar waiter table inside
+# mjs_atomic_wait.c). Windows remains a later issue; on hosts without a
+# backend the C layer returns EXACTLY -ENOSYS, so wait_on_u32 raises the
+# decoded ENOSYS deterministically (never sleeps) and wake_* surface it
+# as a negative return — the backend-parameterized suite detects this
+# and runs its unsupported-backend mode.
 #
 # DOCUMENTED b2 ADAPTATIONS (vs the spec §18 spelling):
 #   - The origin parameter ships as `[origin: Origin]` — b2's generic
@@ -101,7 +102,7 @@ def _decode(rc: Int32) raises -> WaitStatus:
 # the deadline expired first. SPURIOUS .ok IS PERMITTED BY CONTRACT: loop
 # on the predicate.
 #
-# Raises (decoded errno): -ENOSYS where no backend exists yet (#60 et
+# Raises (decoded errno): -ENOSYS where no backend exists (Windows et
 # al.; raised immediately, NEVER sleeps), -EFAULT for a null address,
 # anything else unexpected from the C layer.
 #
