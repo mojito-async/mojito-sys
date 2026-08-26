@@ -117,6 +117,25 @@ def mjs_condvar_wait_until(
     ...
 
 
+# ---- S3.3 atomic wait/wake (issue #59, spec §18) ----------------------------
+#
+# Same leaf-module discipline as the mjs_mutex_* block above: raw @extern
+# bindings + non-raising probe_* shims ONLY. The address argument is a
+# machine-word-backed pointer (the C layer never stores it past the call);
+# deadline_ns is a NULL-able uint64_t* cell (NULL = wait forever), carried
+# as UnsafePointer[UInt64, MutAnyOrigin] with the zero address as the
+# documented NULL.
+comptime WordPtr = UnsafePointer[UInt32, MutAnyOrigin]
+comptime DeadlineSlot = UnsafePointer[UInt64, MutAnyOrigin]
+
+
+@extern("mjs_atomic_wait_on_u32")
+def mjs_atomic_wait_on_u32(
+    addr: WordPtr, expected: Int32, deadline_ns: DeadlineSlot
+) abi("C") -> Int32:
+    ...
+
+
 @extern("mjs_condvar_signal")
 def mjs_condvar_signal(c: CondPtr) abi("C") -> Int32:
     ...
@@ -161,3 +180,23 @@ def probe_cv_broadcast(c: CondHandle) -> Int32:
 
 def probe_cv_destroy(slot: CondSlot) -> Int32:
     return mjs_condvar_destroy(slot)
+@extern("mjs_atomic_wake_one_u32")
+def mjs_atomic_wake_one_u32(addr: WordPtr) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_atomic_wake_all_u32")
+def mjs_atomic_wake_all_u32(addr: WordPtr) abi("C") -> Int32:
+    ...
+
+
+def probe_wait_on(addr: WordPtr, expected: Int32, dl: DeadlineSlot) -> Int32:
+    return mjs_atomic_wait_on_u32(addr, expected, dl)
+
+
+def probe_wake_one(addr: WordPtr) -> Int32:
+    return mjs_atomic_wake_one_u32(addr)
+
+
+def probe_wake_all(addr: WordPtr) -> Int32:
+    return mjs_atomic_wake_all_u32(addr)
