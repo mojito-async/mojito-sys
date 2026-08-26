@@ -644,7 +644,10 @@ int ms_context_init(
  * overwrites its saved state. Capture also REVIVES a FINISHED record:
  * the self-switch re-arm is unconditional, so after capture(ctx) a
  * completed context reads SUSPENDED again and resumes normally from the
- * freshly saved snapshot (#66 lifecycle). */
+ * freshly saved snapshot (#66 lifecycle). Revival also re-fires a
+ * stored finish hook on the new lifetime (capture rewrites only the
+ * state slot; the hook slots persist — see ms_context_set_finish_hook).
+ */
 void ms_context_capture(ms_context *ctx);
 
 /* Save the current state into `from` and resume `to`. Switching is
@@ -670,9 +673,13 @@ void ms_context_destroy(ms_context *ctx);
  * EXACTLY ONCE, on ctx's synthetic stack, after ctx's entry() returns
  * and before the permanent switch-out to the most recent switcher.
  * A context completes at most one lifetime, so a hook fires at most
- * once per record; a hook registered after the context has already
- * FINISHED never fires (the completion pass has already run), and
- * destroy(ctx) discards any registered hook. hook == NULL clears.
+ * once per LIFE; a hook registered after the context has already
+ * FINISHED never fires for that completed life (the completion pass has
+ * already run), and destroy(ctx) discards any registered hook.
+ * Capture-REVIVAL re-fires a stored hook: capture(ctx) (re)writes only
+ * ctx's state slot and leaves the hook slots intact, so a FINISHED
+ * record revived by a later capture begins a fresh lifetime and runs
+ * the stored hook again on that new life. hook == NULL clears.
  * Non-blocking (SYS-5); no allocation (SYS-4); NULL ctx is a caller
  * bug and is ignored (void entry point, same regime as
  * ms_context_destroy). */
