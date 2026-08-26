@@ -89,7 +89,7 @@ static unsigned char g_plain[COMMIT_64K] __attribute__((aligned(16)));
 
 /* ---- fork harness ------------------------------------------------ */
 
-static int child_expect_signal(void (*fn)(void), int want_signal)
+static int child_expect_signal_arg(void (*fn)(size_t), size_t arg, int want_signal)
 {
     pid_t pid;
     int st;
@@ -101,7 +101,7 @@ static int child_expect_signal(void (*fn)(void), int want_signal)
         signal(SIGSEGV, SIG_DFL);
         signal(SIGBUS, SIG_DFL);
         signal(SIGTRAP, SIG_DFL);
-        fn();
+        fn(arg);
         _exit(0); /* surviving a should-trap child = silent bug */
     }
     if (waitpid(pid, &st, 0) < 0) { perror("waitpid"); return 0; }
@@ -379,8 +379,7 @@ static void never_entry(void *v)
 {
     (void)v; /* must never run: restore must trap first */
 }
-
-static void misalign_child(void)
+static void misalign_child(size_t off)
 {
     static _Alignas(8) unsigned long st_m[NSLOTS];
     static _Alignas(8) unsigned long st_c[NSLOTS];
@@ -392,15 +391,16 @@ static void misalign_child(void)
     if (ms_context_init(c, stack_buf, sizeof(stack_buf), never_entry,
                         NULL) != 0)
         _exit(2);
-    /* Forge the saved sp (slot @160) to a 16-MISALIGNED value: bit 3 set
-     * => value % 16 == 8 => not 16-aligned. Restore must trap BEFORE the
-     * garbage sp goes live. */
-    ((unsigned long *)c)[SP_OFF / 8] = stack_top + 8;
+    /* Forge the saved sp (slot @160) to a 16-MISALIGNED value. Each offset
+     * in 1..8 keeps the AAPCS64 requirement of the full 4-bit zero: 1..7
+     * set at least one of bits 0-2 (bit 3 unset), 8 sets only bit 3. The
+     * backend must reject EVERY non-16-aligned sp, not just the bit-3
+     * +8 row. Restore must trap BEFORE the garbage sp goes live. */
+    ((unsigned long *)c)[SP_OFF / 8] = stack_top + off;
     ms_context_capture(m);
     ms_context_switch(m, c); /* must trap (SIGTRAP) */
     _exit(1);                /* silent restore = bug */
 }
-
 /* ------------------------------------------------------------------- */
 
 int main(void)
@@ -415,8 +415,16 @@ int main(void)
     CHECK(child_clean_exit(wrap_child),
           "T4: stack_top wrap rejected -EINVAL, ctx untouched");
     test_frozen_surface();
-    CHECK(child_expect_signal(misalign_child, SIGTRAP),
-          "MISALIGN: forged 16-misaligned sp traps (SIGTRAP in child)");
+    {
+        /* Every non-16-aligned forgery must trap, not just the bit-3 +8
+         * row: 1..7 set low bits 0-2, 8 sets only bit 3 (AAPCS64 needs
+         * the full 4-bit zero). */
+        static const size_t offs[] = {1, 2, 3, 4, 7, 8};
+        size_t i;
+        for (i = 0; i < sizeof(offs) / sizeof(offs[0]); i++)
+            CHECK(child_expect_signal_arg(misalign_child, offs[i], SIGTRAP),
+                  "MISALIGN: forged 16-misaligned sp traps (SIGTRAP in child)");
+    }
 
     printf("RESULT: %s\n", failures ? "FAILED" : "all green");
     return failures ? 1 : 0;
