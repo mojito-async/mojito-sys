@@ -52,8 +52,10 @@ from mojito_sys.thread.thread import (
     ThreadOptions,
     UserdataPtr,
     native_thread_id,
+    no_name,
     set_current_thread_name,
     spawn_native_thread,
+    thread_spawn_args,
 )
 
 # Int64-pointer view of the shared scratch cells (userdata payload layout:
@@ -168,7 +170,7 @@ def main() raises:
     var spawned_ok = True
     var k = 0
     while k < 3:
-        var t = spawn_native_thread(counter_ptr, ud, ThreadOptions())
+        var t = spawn_native_thread(counter_ptr, ud, 0, no_name())
         var st = t.join()
         if st != 0 or cells[0] != Int64(k + 1):
             spawned_ok = False
@@ -181,7 +183,7 @@ def main() raises:
 
     # ---- 2. entry-status propagation through join ----------------------------
     cells[1] = -12345
-    var t2 = spawn_native_thread(status_ptr, ud, ThreadOptions())
+    var t2 = spawn_native_thread(status_ptr, ud, 0, no_name())
     var got = t2.join()
     if not check("T2.2 entry-status propagation (-12345)", got == -12345):
         failed += 1
@@ -204,9 +206,8 @@ def main() raises:
     while pi < NameBufBytes:
         poison[pi] = 0xAA
         pi += 1
-    var named = spawn_native_thread(
-        name_ptr, ud, ThreadOptions(stack_size=0, priority_hint=0, name="mojito-t22")
-    )
+    var nargs = thread_spawn_args(ThreadOptions(name="mojito-t22"))
+    var named = spawn_native_thread(name_ptr, ud, nargs[0], nargs[1])
     var nst = named.join()
     var expected = String("mojito-t22")
     var exp_buf = stack_allocation[16, Byte]()
@@ -224,11 +225,10 @@ def main() raises:
     # ---- 5b. overlong name rejected with ENAMETOOLONG ------------------------
     var toolong_ok = True
     try:
-        _ = spawn_native_thread(
-            counter_ptr,
-            ud,
-            ThreadOptions(stack_size=0, priority_hint=0, name="way-too-long-thread-name"),
+        var oargs = thread_spawn_args(
+            ThreadOptions(name="way-too-long-thread-name")
         )
+        _ = spawn_native_thread(counter_ptr, ud, oargs[0], oargs[1])
         toolong_ok = False  # must have raised
     except e:
         toolong_ok = contains(String(e), "errno 63")  # darwin ENAMETOOLONG
@@ -237,7 +237,7 @@ def main() raises:
 
     # ---- 5c. default options (NULL name path) spawn cleanly ------------------
     cells[0] = 0
-    var t_def = spawn_native_thread(counter_ptr, ud, ThreadOptions())
+    var t_def = spawn_native_thread(counter_ptr, ud, 0, no_name())
     var dst = t_def.join()
     if not check("T2.2 default-options spawn (NULL name)", dst == 0 and cells[0] == 1):
         failed += 1
@@ -257,7 +257,7 @@ def main() raises:
         failed += 1
 
     # ---- 4. detach clean exit incl. T** consume semantics --------------------
-    var t4 = spawn_native_thread(sleep_ptr, ud, ThreadOptions())
+    var t4 = spawn_native_thread(sleep_ptr, ud, 0, no_name())
     t4.detach()
     # Consume semantics: detach NULLed the C-side *t; the wrapper mirrored it.
     var consume_ok = t4.consumed
@@ -285,7 +285,7 @@ def main() raises:
     var cyc_fail = 0
     var c = 0
     while c < 50:
-        var t = spawn_native_thread(counter_ptr, ud, ThreadOptions())
+        var t = spawn_native_thread(counter_ptr, ud, 0, no_name())
         var st = t.join()
         if st != 0 or cells[0] != Int64(c + 1):
             cyc_fail += 1
@@ -294,7 +294,7 @@ def main() raises:
     while dc < 50:
         # Instant-exit entries: detach may land before OR after the child's
         # exit — both orders are deterministic, error-free paths in C.
-        var t = spawn_native_thread(counter_ptr, ud, ThreadOptions())
+        var t = spawn_native_thread(counter_ptr, ud, 0, no_name())
         t.detach()
         dc += 1
     # Drain any detached children before process exit (clean-exit guarantee).
