@@ -63,10 +63,6 @@ from std.sys import CompilationTarget
 
 from mojito_sys.io.externs import (
     ByteBuf,
-    UringPtr,
-    U32Slot,
-    TimeoutSlot,
-    WaitCountSlot,
     probe_uring_probe,
     probe_uring_available,
 )
@@ -240,7 +236,7 @@ def _unsupported(name: String) -> Bool:
 # ---- behavior rows (Linux + flag only) -----------------------------------------
 
 # t8_03: register a pipe reader, write a byte, wait -> token round trip.
-def _run_roundtrip(mut p: IoUringPoller) -> Bool:
+def _run_roundtrip(mut p: IoUringPoller) raises -> Bool:
     var fds = stack_allocation[2, Int32]()
     if not _pipe_into(fds):
         return False
@@ -267,7 +263,7 @@ def _run_roundtrip(mut p: IoUringPoller) -> Bool:
 
 # t8_04: query SQ/CQ entry counts; grow through a batch of registrations
 # and confirm completions keep flowing (SQ/CQ growth, §38.7 io_uring).
-def _run_growth(mut p: IoUringPoller) -> Bool:
+def _run_growth(mut p: IoUringPoller) raises -> Bool:
     var sqc = stack_allocation[1, UInt32]()
     var cqc = stack_allocation[1, UInt32]()
     if p.entries(sqc, cqc) != 0:
@@ -326,7 +322,7 @@ def _run_growth(mut p: IoUringPoller) -> Bool:
 
 
 # t8_05-t8_11 common poller cases (Linux + flag only).
-def _run_register_writable(mut p: IoUringPoller) -> Bool:
+def _run_register_writable(mut p: IoUringPoller) raises -> Bool:
     var fds = stack_allocation[2, Int32]()
     if not _pipe_into(fds):
         return False
@@ -347,7 +343,7 @@ def _run_register_writable(mut p: IoUringPoller) -> Bool:
     return ok
 
 
-def _run_timeout(mut p: IoUringPoller) -> Bool:
+def _run_timeout(mut p: IoUringPoller) raises -> Bool:
     var fds = stack_allocation[2, Int32]()
     if not _pipe_into(fds):
         return False
@@ -361,7 +357,7 @@ def _run_timeout(mut p: IoUringPoller) -> Bool:
     return n == 0
 
 
-def _run_multiple(mut p: IoUringPoller) -> Bool:
+def _run_multiple(mut p: IoUringPoller) raises -> Bool:
     var pa = stack_allocation[2, Int32]()
     var pb = stack_allocation[2, Int32]()
     if (not _pipe_into(pa)) or (not _pipe_into(pb)):
@@ -396,7 +392,7 @@ def _run_multiple(mut p: IoUringPoller) -> Bool:
     return ok
 
 
-def _run_unregister(mut p: IoUringPoller) -> Bool:
+def _run_unregister(mut p: IoUringPoller) raises -> Bool:
     var fds = stack_allocation[2, Int32]()
     if not _pipe_into(fds):
         return False
@@ -416,7 +412,7 @@ def _run_unregister(mut p: IoUringPoller) -> Bool:
     return (n1 == 1) and (n2 == 0)
 
 
-def _run_token_reuse(mut p: IoUringPoller) -> Bool:
+def _run_token_reuse(mut p: IoUringPoller) raises -> Bool:
     var fds = stack_allocation[2, Int32]()
     if not _pipe_into(fds):
         return False
@@ -437,7 +433,7 @@ def _run_token_reuse(mut p: IoUringPoller) -> Bool:
     return ok
 
 
-def _run_eof(mut p: IoUringPoller) -> Bool:
+def _run_eof(mut p: IoUringPoller) raises -> Bool:
     var fds = stack_allocation[2, Int32]()
     if not _pipe_into(fds):
         return False

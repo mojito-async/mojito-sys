@@ -269,5 +269,135 @@ def probe_poller_wake(p: PollerPtr) -> Int32:
     return mjs_poller_wake(p)
 
 
-def probe_poller_close(p: PollerSlot) -> Int32:
-    return mjs_poller_close(p)
+# ---- s6-ioring bindings (issue #78) ------------------------------------------
+#
+# Same LEAF discipline as the s6-poller/s6-socket bindings above: raw @extern
+# declarations + non-raising probe_* shims ONLY. mojito_sys.io.platform.iouring
+# decodes/raises after each call returns. The mjs_iouring_* ABI reuses the
+# shared mjs_poll_event wire format from the s6-poller block, so wait() talks
+# the same ByteBuf/TimeoutSlot/WaitCountSlot shape.
+#
+# SCALAR BOUNDARY NOTES (byval-poison class, b2): interests, cap and the
+# entries out-slots cross as Int32 / neutralize to Int32 where needed; the
+# probe_* shims stay tiny, non-raising, aggregate-free.
+
+# Opaque mjs_uring* C handle, carried as an untyped byte pointer.
+comptime UringPtr = UnsafePointer[Byte, MutAnyOrigin]
+
+# mjs_uring** create/close slots.
+comptime UringSlot = UnsafePointer[UringPtr, MutAnyOrigin]
+
+# unsigned* out-slots for SQ/CQ geometry.
+comptime U32Slot = UnsafePointer[UInt32, MutAnyOrigin]
+
+
+@extern("mjs_iouring_probe")
+def mjs_iouring_probe() abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_iouring_available")
+def mjs_iouring_available() abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_iouring_create")
+def mjs_iouring_create(out_slot: UringSlot) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_iouring_register")
+def mjs_iouring_register(
+    p: UringPtr, fd: Int32, interests: Int32, token: UInt64
+) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_iouring_modify")
+def mjs_iouring_modify(
+    p: UringPtr, fd: Int32, interests: Int32, token: UInt64
+) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_iouring_unregister")
+def mjs_iouring_unregister(p: UringPtr, fd: Int32) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_iouring_wait")
+def mjs_iouring_wait(
+    p: UringPtr,
+    events: ByteBuf,
+    cap: Int32,
+    timeout_ns: TimeoutSlot,
+    out_n: WaitCountSlot,
+) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_iouring_wake")
+def mjs_iouring_wake(p: UringPtr) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_iouring_entries")
+def mjs_iouring_entries(
+    p: UringPtr, out_sq: U32Slot, out_cq: U32Slot
+) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_iouring_close")
+def mjs_iouring_close(p: UringSlot) abi("C") -> Int32:
+    ...
+
+
+def probe_uring_probe() -> Int32:
+    return mjs_iouring_probe()
+
+
+def probe_uring_available() -> Int32:
+    return mjs_iouring_available()
+
+
+def probe_uring_create(out_slot: UringSlot) -> Int32:
+    return mjs_iouring_create(out_slot)
+
+
+def probe_uring_register(
+    p: UringPtr, fd: Int32, interests: Int32, token: UInt64
+) -> Int32:
+    return mjs_iouring_register(p, fd, interests, token)
+
+
+def probe_uring_modify(
+    p: UringPtr, fd: Int32, interests: Int32, token: UInt64
+) -> Int32:
+    return mjs_iouring_modify(p, fd, interests, token)
+
+
+def probe_uring_unregister(p: UringPtr, fd: Int32) -> Int32:
+    return mjs_iouring_unregister(p, fd)
+
+
+def probe_uring_wait(
+    p: UringPtr,
+    events: ByteBuf,
+    cap: Int32,
+    timeout_ns: TimeoutSlot,
+    out_n: WaitCountSlot,
+) -> Int32:
+    return mjs_iouring_wait(p, events, cap, timeout_ns, out_n)
+
+
+def probe_uring_wake(p: UringPtr) -> Int32:
+    return mjs_iouring_wake(p)
+
+
+def probe_uring_entries(p: UringPtr, out_sq: U32Slot, out_cq: U32Slot) -> Int32:
+    return mjs_iouring_entries(p, out_sq, out_cq)
+
+
+def probe_uring_close(p: UringSlot) -> Int32:
+    return mjs_iouring_close(p)
