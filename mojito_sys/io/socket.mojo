@@ -179,6 +179,12 @@ comptime ATTEMPT_WOULD_BLOCK = UInt8(1)
 comptime ATTEMPT_INTERRUPTED = UInt8(2)
 comptime ATTEMPT_ERROR = UInt8(3)
 comptime ATTEMPT_CLOSED = UInt8(4)
+# IoAttempt READY-payload flavor (panel fold — #76): the single carrier
+# ships TWO distinct READY payload shapes, an accepted socket descriptor
+# and a byte count. Cross-kind access must fail LOUD (decoded -EINVAL),
+# never silently read the wrong cell as 0 / a bogus fd.
+comptime PAYLOAD_FD = UInt8(0)     # READY payload is take_ready_fd()
+comptime PAYLOAD_COUNT = UInt8(1)  # READY payload is ready_count()
 
 
 # Classify a raw C rc from accept/recv/send into its IoAttempt kind tag.
@@ -231,17 +237,20 @@ struct IoAttempt(Movable):
     var err: Int32    # positive errno when kind == ERROR, else 0
     var count: Int    # READY byte-count payload (recv/send)
     var fd: Int32     # READY accepted-descriptor payload; NO_FD after take
+    var payload: UInt8  # READY payload flavor: PAYLOAD_FD or PAYLOAD_COUNT
 
     def __init__(out self):
         self.kind = ATTEMPT_ERROR
         self.err = 0
         self.count = 0
         self.fd = NO_FD
+        self.payload = PAYLOAD_FD
 
     @staticmethod
     def ready_count(n: Int) -> IoAttempt:
         var a = IoAttempt()
         a.kind = ATTEMPT_READY
+        a.payload = PAYLOAD_COUNT
         a.count = n
         return a^
 
@@ -249,6 +258,7 @@ struct IoAttempt(Movable):
     def ready_fd(accepted_fd: Int32) -> IoAttempt:
         var a = IoAttempt()
         a.kind = ATTEMPT_READY
+        a.payload = PAYLOAD_FD
         a.fd = accepted_fd
         return a^
 
@@ -298,12 +308,24 @@ struct IoAttempt(Movable):
         return self.err
 
     # The READY byte-count payload (recv/send attempts).
-    def ready_count(self) -> Int:
+    #
+    # Cross-kind misuse is LOUD (panel fold — #76): reading a count off a
+    # socket-fd (or any non-ready) attempt raises decoded -EINVAL instead
+    # of silently returning 0.
+    def ready_count(self) raises -> Int:
+        if (not self.is_ready()) or (self.payload != PAYLOAD_COUNT):
+            raise_errno(EINVAL_RC)
         return self.count
 
     # Consume the READY accepted-descriptor payload (accept attempts).
     # Single-take: the fd cell resets to NO_FD afterwards.
-    def take_ready_fd(mut self) -> Int32:
+    #
+    # Cross-kind misuse is LOUD (panel fold — #76): taking an fd off a
+    # count (or any non-ready) attempt raises decoded -EINVAL instead of
+    # silently returning NO_FD.
+    def take_ready_fd(mut self) raises -> Int32:
+        if (not self.is_ready()) or (self.payload != PAYLOAD_FD):
+            raise_errno(EINVAL_RC)
         var taken = self.fd
         self.fd = NO_FD
         return taken
