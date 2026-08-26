@@ -552,8 +552,15 @@ int mjs_event_destroy(mjs_event **e);
  *     regs[12] @   0.. 95  x19..x28, fp(x29) @80, lr(x30) @88
  *     fps[8]   @  96..159  low 64 bits of v8..v15 (d8..d15)
  *     sp       @ 160       saved stack pointer
- * A switch saves/restores exactly these plus sp; nothing else. Backends
- * NEVER write x18 (platform-reserved on Apple platforms).
+ * Backends (#72): the frozen v2/v3 layout is shared verbatim by the
+ * AArch64 backend (ms_context_aarch64.S) and, on x86-64 System V targets,
+ * the x86-64 backend (ms_context_x86_64.S, spec §21 #2). On x86-64 SysV
+ * the regs[12] prefix holds rbx,rbp,r12-r15 in slots [0..5] ([6..11]
+ * reserved) and fps[8] holds the low 64 bits of xmm6..xmm13; xmm14/xmm15
+ * are NOT preservable within the frozen record (a declared backend
+ * limitation), the switch traps on the same misuse classes via int3, and
+ * the backend is not NativeContext-supported until its conformance suite
+ * passes (spec §38.6), tracked in tests/s5/x86.
  *
  * Synthetic entry: ms_context_init prepares ctx so its first resume
  * lands on an internal trampoline that calls entry(userdata) with a
