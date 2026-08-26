@@ -180,6 +180,8 @@ def probe_cv_broadcast(c: CondHandle) -> Int32:
 
 def probe_cv_destroy(slot: CondSlot) -> Int32:
     return mjs_condvar_destroy(slot)
+
+
 @extern("mjs_atomic_wake_one_u32")
 def mjs_atomic_wake_one_u32(addr: WordPtr) abi("C") -> Int32:
     ...
@@ -200,3 +202,65 @@ def probe_wake_one(addr: WordPtr) -> Int32:
 
 def probe_wake_all(addr: WordPtr) -> Int32:
     return mjs_atomic_wake_all_u32(addr)
+
+
+# ---- S3.5: mjs_event_* bindings (issue #61) ---------------------------------
+#
+# Same leaf-module discipline as the blocks above. The wait_until
+# deadline is an ABSOLUTE monotonic nanosecond count (the mjs_clock_now
+# domain); wait_until returns 0 / -ETIMEDOUT / -errno exactly like the
+# condvar binding — the wrapper decodes the -ETIMEDOUT STATUS into
+# WaitStatus.timed_out. Wake semantics live in the C ABI block
+# (auto-reset, breadth-one; see the s3-event header comment).
+comptime EventHandle = Int64
+
+# mjs_event_init / mjs_event_destroy take mjs_event** slots.
+comptime EventSlot = UnsafePointer[Int64, MutAnyOrigin]
+
+# Single-level mjs_event* argument of wait/wait_until/signal.
+comptime EventPtr = UnsafePointer[Int64, MutAnyOrigin]
+
+
+@extern("mjs_event_init")
+def mjs_event_init(out_slot: EventSlot) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_event_wait")
+def mjs_event_wait(e: EventPtr) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_event_wait_until")
+def mjs_event_wait_until(e: EventPtr, deadline_ns: UInt64) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_event_signal")
+def mjs_event_signal(e: EventPtr) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_event_destroy")
+def mjs_event_destroy(slot: EventSlot) abi("C") -> Int32:
+    ...
+
+
+def probe_ev_init(out_slot: EventSlot) -> Int32:
+    return mjs_event_init(out_slot)
+
+
+def probe_ev_wait(e: EventHandle) -> Int32:
+    return mjs_event_wait(EventPtr(unsafe_from_address=Int(e)))
+
+
+def probe_ev_wait_until(e: EventHandle, dl: UInt64) -> Int32:
+    return mjs_event_wait_until(EventPtr(unsafe_from_address=Int(e)), dl)
+
+
+def probe_ev_signal(e: EventHandle) -> Int32:
+    return mjs_event_signal(EventPtr(unsafe_from_address=Int(e)))
+
+
+def probe_ev_destroy(slot: EventSlot) -> Int32:
+    return mjs_event_destroy(slot)
