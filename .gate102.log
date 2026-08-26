@@ -1,0 +1,11 @@
+== fast suite (selftest, T1-T7) — fast=1
+selftest                               PASS
+t1-t7                                  PASS
+s1-tests                               PASS
+s2-tests                               PASS
+s2-conformance                         PASS
+s2-stress                              PASS
+s2-integration                         PASS
+s2-pkg                                 PASS
+no-markers                             PASS
+gate: all checks passed

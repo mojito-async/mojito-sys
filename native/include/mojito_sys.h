@@ -385,6 +385,56 @@ int mjs_condvar_broadcast(mjs_condvar *c);
 int mjs_condvar_destroy(mjs_condvar **c);
 
 
+/* --- s3-atomic-wait --- */
+/*
+ * S3.3 atomic wait/wake on u32 words (issue #59, spec §18). Same
+ * return-value contract as above: 0 == success; negative == -errno;
+ * out-params UNTOUCHED on failure. wake_* return the number of waiters
+ * woken (>= 0) or a negative -errno.
+ *
+ * Backend map (spec §18): Linux futex (FUTEX_WAIT_PRIVATE /
+ * FUTEX_WAKE_PRIVATE). Windows WaitOnAddress/WakeByAddress* and the
+ * macOS fallback are LATER issues (#60 et al.) — hosts without a backend
+ * this issue return EXACTLY -ENOSYS from every entry point, so callers
+ * and the conformance suite can detect-and-exclude cleanly.
+ *
+ * Deadline: absolute monotonic nanoseconds, SAME epoch as mjs_clock_now.
+ * NULL waits indefinitely. Time64 safety: implementations MUST derive
+ * any kernel timeout from the remaining span against mjs_clock_now, so
+ * no 32-bit time_t ever carries an absolute deadline value.
+ *
+ * Status mapping contract for wait:
+ *   0           — woken by a wake_*, OR the word did not hold `expected`
+ *                 when the kernel re-checked it (futex EAGAIN): both mean
+ *                 "the caller must re-read the word", i.e. WaitStatus.ok.
+ *                 Spurious .ok is permitted by the shared contract
+ *                 (mojito_sys/sync/common.mojo); always re-check the
+ *                 predicate and re-wait in a loop.
+ *   -ETIMEDOUT  — the deadline expired first (WaitStatus.timed_out).
+ *   other       — genuine error, negative -errno verbatim (-EFAULT for a
+ *                 NULL address).
+ */
+
+/* Block the calling thread while *(uint32_t*)addr == expected, until a
+ * wake_one/wake_all on addr, the deadline passing, or the word changing.
+ * Returns 0 / -ETIMEDOUT / -errno per the mapping above; NULL addr is
+ * -EFAULT with nothing read. Blocking (SYS-5): parks the calling OS
+ * thread in the kernel waiter queue keyed by addr. Allocation: none
+ * (SYS-4). Task-aware: no — OS-thread granularity (§14). */
+int mjs_atomic_wait_on_u32(const uint32_t *addr, uint32_t expected,
+                           const uint64_t *deadline_ns);
+
+/* Wake ONE waiter blocked on addr (FIFO choice per the OS). Returns the
+ * exact number woken (0 when none were waiting), or -errno; NULL addr is
+ * -EFAULT. Non-blocking (SYS-5). Allocation: none (SYS-4). Task-aware:
+ * no. */
+int mjs_atomic_wake_one_u32(uint32_t *addr);
+
+/* Wake ALL waiters currently blocked on addr. Same contract as
+ * mjs_atomic_wake_one_u32 with the wake count unbounded. Non-blocking
+ * (SYS-5). Allocation: none (SYS-4). Task-aware: no. */
+int mjs_atomic_wake_all_u32(uint32_t *addr);
+
 #ifdef __cplusplus
 }
 #endif
