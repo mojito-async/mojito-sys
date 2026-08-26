@@ -622,6 +622,152 @@ void ms_context_switch(
  * Destroying a currently-running context from inside itself is a
  * caller bug. */
 void ms_context_destroy(ms_context *ctx);
+/* --- s6-socket --- */
+/*
+ * S6.2 non-blocking sockets (issue #74, spec §26). Same return-value
+ * contract as above: 0 == success; negative == -errno; out-params UNTOUCHED
+ * on failure (a NULL out-slot fails with -EFAULT before anything else).
+ *
+ * Blocking (SYS-5): every entry point here performs ONE readiness-agnostic
+ * syscall and never waits for socket readiness. The exceptions:
+ *   - mjs_socket_connect on a BLOCKING socket blocks until the handshake
+ *     completes or fails (on a non-blocking socket it reports -EINPROGRESS
+ *     immediately — a STATUS, like try_lock's -EBUSY);
+ *   - close(2)/shutdown(2) may block inside the kernel only insofar as
+ *     SO_LINGER demands.
+ *
+ * EINTR/EAGAIN policy (spec §38.11): accept/recv/send NEVER retry
+ * internally and NEVER wait — -EINTR and -EAGAIN surface to the caller so
+ * a reactor decides (the Mojo layer maps them to Interrupted/WouldBlock).
+ * The one-shot entry points below cannot be interrupted mid-operation;
+ * their errno passes through unchanged. On darwin, close(2) reports EINTR
+ * only AFTER releasing the descriptor: callers must treat ANY close()
+ * return as final and never retry (the Mojo wrapper closes exactly once).
+ *
+ * Descriptor ownership: fds minted by mjs_socket_socket / returned through
+ * mjs_socket_accept are owned by the caller; exactly ONE successful
+ * mjs_socket_close releases each. Closing an already-closed fd is caller
+ * error (-EBADF surfaces raw).
+ *
+ * Determinism note: an accepted socket INHERITS its listener's O_NONBLOCK
+ * state explicitly (Linux inherits through accept(2), darwin does not) so
+ * downstream WouldBlock behavior is identical across hosts.
+ */
+
+/* Platform-neutral address families / socket types. Values follow POSIX
+ * where hosts agree; AF_INET6 differs numerically (30 darwin / 10 Linux),
+ * so it travels under this neutral spelling. */
+#define MJS_SOCK_STREAM 1
+#define MJS_SOCK_DGRAM  2
+#define MJS_SOCK_INET   2
+#define MJS_SOCK_UNIX   1
+#if defined(__APPLE__)
+#define MJS_SOCK_INET6 30
+#else
+#define MJS_SOCK_INET6 10
+#endif
+
+/* Shutdown halves (mjs_socket_shutdown `how`). */
+#define MJS_SHUT_READ  0
+#define MJS_SHUT_WRITE 1
+#define MJS_SHUT_BOTH  2
+
+/* Platform-neutral socket address (SYS-3: fixed layout, no OS sockaddr
+ * struct leaks across the firewall). Port is HOST byte order; conversion
+ * happens inside the C layer. octets holds IPv4 bytes in [0..3] (rest
+ * zero) or all 16 IPv6 bytes; path holds a NUL-terminated unix path of at
+ * most 103 chars (+ NUL). Layout is byte-stable: int32 @0, uint16 @4,
+ * pad @6, uint32 flowinfo @8, uint32 scope_id @12, octets @16..31,
+ * path @32..135; sizeof == 136 on LP64 hosts. */
+typedef struct mjs_sockaddr {
+    int32_t family;
+    uint16_t port;      /* host byte order */
+    uint16_t _pad0;
+    uint32_t flowinfo;  /* IPv6 flow label; ignored otherwise */
+    uint32_t scope_id;  /* IPv6 scope id; ignored otherwise */
+    unsigned char octets[16];
+    char path[104];
+} mjs_sockaddr;
+
+/* Create a socket of `family` (MJS_SOCK_*) and `type` (MJS_SOCK_*). An
+ * unknown family/type is -EINVAL with *out_fd untouched. On success stores
+ * the owned descriptor in *out_fd. Non-blocking (SYS-5); no allocation. */
+int mjs_socket_socket(int family, int type, int *out_fd);
+
+/* Set/clear O_NONBLOCK on `fd`. Unknown flags state is never assumed: the
+ * current F_GETFL flags are read-modify-written. Non-blocking (SYS-5). */
+int mjs_socket_set_nonblocking(int fd, int enabled);
+
+/* Bind `fd` to the platform-neutral address. The port travels in HOST byte
+ * order and is converted inside. A NULL addr is -EFAULT; an unconvertible
+ * family is -EINVAL; a too-long unix path (>= its sun_path) is
+ * -ENAMETOOLONG. Non-blocking (SYS-5). */
+int mjs_socket_bind(int fd, const mjs_sockaddr *addr);
+
+/* Mark `fd` as passive with `backlog`. backlog < 0 is -EINVAL. On success
+ * the socket may yield connections via mjs_socket_accept. Non-blocking
+ * (SYS-5). */
+int mjs_socket_listen(int fd, int backlog);
+
+/* Initiate a connection to `addr`. On a BLOCKING socket this blocks until
+ * the handshake settles (SYS-5). On a non-blocking socket it returns
+ * -EINPROGRESS as a documented STATUS: the connection attempt continues;
+ * callers await writability to learn the outcome. A NULL addr is -EFAULT.
+ * Connection failures on a blocking socket surface as their errno
+ * (-ECONNREFUSED, -ECONNRESET, ...). */
+int mjs_socket_connect(int fd, const mjs_sockaddr *addr);
+
+/* Extract ONE pending connection from listener `fd`. NEVER blocks or waits
+ * (SYS-5): without a queued peer it returns -EAGAIN immediately; -EINTR
+ * surfaces raw for the caller to retry. On success stores the owned client
+ * descriptor in *out_client and, when out_peer is non-NULL, the peer
+ * address in *out_peer (out_client/out_peer untouched on failure). The
+ * accepted socket inherits the listener's O_NONBLOCK state deterministically. */
+int mjs_socket_accept(int fd, int *out_client, mjs_sockaddr *out_peer);
+
+/* ONE recv(2) attempt on `fd` into buf[0..len); NEVER waits (SYS-5).
+ * Success: 0 with *out_n = bytes received; *out_n == 0 means orderly EOF.
+ * len == 0 is -EINVAL. Partial receives are normal and reported as-is.
+ * -EAGAIN/-EWOULDBLOCK when no data is ready; -EINTR surfaces raw; any
+ * other errno passes through unchanged (-ECONNRESET after peer reset).
+ * buf NULL or out_n NULL with len > 0 is -EFAULT. */
+int mjs_socket_recv(int fd, unsigned char *buf, size_t len, size_t *out_n);
+
+/* ONE send(2) attempt on `fd` from buf[0..len); NEVER waits (SYS-5).
+ * Success: 0 with *out_n = bytes ACCEPTED by the kernel (which may be a
+ * PARTIAL prefix of len — callers must loop over the remainder). len == 0
+ * is -EINVAL. -EAGAIN/-EWOULDBLOCK when the send buffer is full; -EINTR
+ * surfaces raw; other errnos pass through unchanged. buf NULL or out_n
+ * NULL with len > 0 is -EFAULT. */
+int mjs_socket_send(int fd, const unsigned char *buf, size_t len,
+                    size_t *out_n);
+
+/* Shut down one/both transfer halves: how is MJS_SHUT_READ/WRITE/BOTH.
+ * Anything else is -EINVAL. Non-blocking (SYS-5). */
+int mjs_socket_shutdown(int fd, int how);
+
+/* Close `fd`, releasing the descriptor exactly once per call. ANY return
+ * value is FINAL: never retry close (darwin reports EINTR only after the
+ * descriptor is already released). fd < 0 is -EBADF. Blocking (SYS-5):
+ * only inside the kernel per SO_LINGER. */
+int mjs_socket_close(int fd);
+
+/* ---- sockaddr helpers ---------------------------------------------------
+ * Address conversion between dotted-quad text and the neutral layout.
+ * Same contract: 0 / negative -errno; out-params untouched on failure.
+ * Non-blocking (SYS-5); no allocation beyond libc's fixed buffers. */
+
+/* Parse dotted-quad IPv4 text into *out with host-order `port`.
+ * Malformed text (inet_pton != 1), port outside [0, 65535], or a NULL
+ * argument is -EFAULT/-EINVAL with *out untouched. */
+int mjs_sockaddr_ipv4(const char *dotted, int port, mjs_sockaddr *out);
+
+/* Format the IPv4 address in *addr as dotted-quad text into out_buf
+ * (NUL-terminated). Requires addr->family == MJS_SOCK_INET (-EINVAL
+ * otherwise); cap < needed length (incl. NUL) is -EINVAL. Stores the
+ * string length (no NUL) in *out_len on success. */
+int mjs_sockaddr_format4(const mjs_sockaddr *addr, char *out_buf,
+                         size_t cap, size_t *out_len);
 
 #ifdef __cplusplus
 }

@@ -5,6 +5,12 @@ Spec §27.1 surface (readiness/completion interfaces) is anchored here:
     value type consumed by ReadinessPoller.register(handle, ...) and by
     every other io wrapper in the §25 ownership family.
 
+S6.2 (issue #74) adds the §26 non-blocking socket surface:
+  - mojito_sys.io.externs — pure-extern leaf binding mjs_socket_*
+    (b2 leaf-module workaround; NOT for caller use);
+  - mojito_sys.io.socket — NativeSocket / SocketAddress / IoAttempt
+    (Ready/WouldBlock/Interrupted/Error/Closed; never parks a task).
+
 Subpackage scaffold; the wrappers live in sibling modules.
 """
 
