@@ -30,3 +30,4 @@ tests/s6/*/.build/
 tests/s6/*/*/.build/
 benchmark/*/.build/
 benchmark/*/*.log
+spike/completion/.build/
