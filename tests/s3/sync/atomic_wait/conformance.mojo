@@ -203,18 +203,26 @@ def _ping_entry(ud: CellsPtr) abi("C") -> Int64:
     var rounds = ud[2]
     var i = Int64(0)
     while i < rounds:
-        try:
-            var st = wait_on_u32(
-                turn,
-                mine,
-                Optional[MonotonicInstant](now_plus(PING_WAIT_MS)),
-            )
-            if st != WaitStatus.ok:
-                ud[3] = 1  # timed out: lost wake — report, never hang
+        # Deterministic handoff: proceed only once the word holds MY
+        # value. Sleep on the CURRENT word contents (any change releases
+        # the wait with .ok), re-check the predicate after EVERY .ok —
+        # spurious and EAGAIN-style returns just re-arm. Strict
+        # alternation follows: my value is produced ONLY by the peer's
+        # flip, so exactly one store happens per direction per round and
+        # the final parity is guaranteed (no last-writer race).
+        while turn[] != mine:
+            try:
+                var st = wait_on_u32(
+                    turn,
+                    turn[],
+                    Optional[MonotonicInstant](now_plus(PING_WAIT_MS)),
+                )
+                if st != WaitStatus.ok:
+                    ud[3] = 1  # timed out: lost wake — report, never hang
+                    return -1
+            except:
+                ud[3] = 1
                 return -1
-        except:
-            ud[3] = 1
-            return -1
         turn[] = UInt32(1) - mine
         _ = wake_one_u32(turn)
         i += 1
@@ -266,6 +274,8 @@ def run_semantic_mode() raises -> Bool:
     one_args[0] = Int64(Int(w3))
     one_args[1] = Int64(5)
     one_args[2] = -99  # status sentinel
+    one_args[3] = Int(one_flag)
+    one_args[4] = Int64(WAITER_TIMEOUT_MS)
     var w = spawn_native_thread(
         entry_pointer["mjs_s33_waiter_entry"](), one_args, 0, no_name()
     )

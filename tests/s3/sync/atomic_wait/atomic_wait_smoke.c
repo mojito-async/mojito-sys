@@ -89,12 +89,22 @@ static void *ping_main(void *arg) {
     ping_arg_t *pa = arg;
     const uint32_t *turn = (const uint32_t *)(uintptr_t)pa->turn;
     for (int i = 0; i < pa->rounds; i++) {
-        uint64_t dl = abs_deadline_ms(30000);
-        int rc = mjs_atomic_wait_on_u32(turn, (uint32_t)pa->my_turn, &dl);
-        if (rc != 0 ||
-            atomic_load_explicit(pa->turn, memory_order_acquire) !=
-                (uint32_t)pa->my_turn)
-            return (void *)(intptr_t)-1;
+        /* Deterministic handoff (mirrors the Mojo conformance entry):
+         * proceed only once the word holds MY value. Sleep on the
+         * CURRENT contents — any change releases the wait with .ok —
+         * and re-check the predicate after EVERY .ok (spurious and
+         * EAGAIN-style returns just re-arm). My value is produced only
+         * by the peer's flip, so alternation is strict and the final
+         * parity is guaranteed; no last-writer race exists. */
+        while (atomic_load_explicit(pa->turn, memory_order_acquire) !=
+               (uint32_t)pa->my_turn) {
+            uint64_t dl = abs_deadline_ms(30000);
+            uint32_t cur =
+                atomic_load_explicit(pa->turn, memory_order_relaxed);
+            int rc = mjs_atomic_wait_on_u32(turn, cur, &dl);
+            if (rc != 0)
+                return (void *)(intptr_t)-1;
+        }
         atomic_store_explicit(
             pa->turn, (uint32_t)(1 - pa->my_turn), memory_order_release);
         if (mjs_atomic_wake_one_u32((uint32_t *)(uintptr_t)pa->turn) < 0)

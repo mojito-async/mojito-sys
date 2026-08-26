@@ -393,10 +393,13 @@ int mjs_condvar_destroy(mjs_condvar **c);
  * woken (>= 0) or a negative -errno.
  *
  * Backend map (spec §18): Linux futex (FUTEX_WAIT_PRIVATE /
- * FUTEX_WAKE_PRIVATE). Windows WaitOnAddress/WakeByAddress* and the
- * macOS fallback are LATER issues (#60 et al.) — hosts without a backend
- * this issue return EXACTLY -ENOSYS from every entry point, so callers
- * and the conformance suite can detect-and-exclude cleanly.
+ * FUTEX_WAKE_PRIVATE) and — since #60 — a macOS fallback: an
+ * address-keyed waiter table (256 hashed slots of NativeMutex +
+ * NativeCondVar, composed from the exported mjs_mutex / mjs_condvar
+ * layer, zero new symbols, no __ulock or private kernel interface).
+ * Windows WaitOnAddress/WakeByAddress* remains a LATER issue — hosts
+ * without a backend return EXACTLY -ENOSYS from every entry point, so
+ * callers and the conformance suite can detect-and-exclude cleanly.
  *
  * Deadline: absolute monotonic nanoseconds, SAME epoch as mjs_clock_now.
  * NULL waits indefinitely. Time64 safety: implementations MUST derive
