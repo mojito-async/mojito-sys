@@ -32,7 +32,7 @@ TEST_NAME="s5_ctx_conformance"
 
 # Guarded-alloc T13 build flag: 0 (RED) = raw caller-provided buffer with no
 # guard page; 1 = mjs_stack_alloc paints a real PROT_NONE guard page.
-GUARDED=${CONFORMANCE_GUARDED:-0}
+GUARDED=${CONFORMANCE_GUARDED:-1}
 
 if ! command -v "$CC" >/dev/null 2>&1; then
     echo "== $TEST_NAME: SKIP-FAIL — compiler '$CC' not found"
