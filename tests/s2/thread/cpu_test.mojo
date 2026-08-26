@@ -37,9 +37,9 @@
 #
 # Run via tests/s2/thread/run.sh (builds libmojito_sys.dylib first).
 
-from os import getenv
+from std.os import getenv
 
-from mojito_sys.thread.affinity import CPUSET_MAX_CPUS, CpuSet, set_current_thread_affinity
+from mojito_sys.thread.affinity import CPUSET_WORDS, CpuSet, set_current_thread_affinity
 from mojito_sys.thread.cpu_info import cpu_logical_count, cpu_physical_count
 
 
@@ -57,7 +57,7 @@ def errno_is(e: Error, name: String) -> Bool:
     return String(e).find(name) != -1
 
 
-def env_int(name: String) -> Int:
+def env_int(name: String) raises -> Int:
     # Runner-captured host fact; empty string means "host did not expose it".
     var v = getenv(name)
     if v.byte_length() == 0:
@@ -160,10 +160,10 @@ def main() raises:
     if not check("builder-word-boundary", ok):
         failed += 1
 
-    # Capacity guard: beyond CPUSET_MAX_CPUS*64 bits must be rejected.
+    # Capacity guard: beyond CPUSET_WORDS*64 bits must be rejected.
     ok = False
     try:
-        _ = CpuSet.from_range(0, CPUSET_MAX_CPUS * 64 + 1)
+        _ = CpuSet.from_range(0, CPUSET_WORDS * 64 + 1)
     except e:
         ok = errno_is(e, "EINVAL")
     if not check("builder-capacity-guard", ok):
