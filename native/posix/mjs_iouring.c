@@ -252,6 +252,18 @@ static int uring_stage_timeout(struct mjs_uring *u,
     return 0;
 }
 
+/* Stage one timeout-remove SQE cancelling the armed timeout whose user_data
+ * == MJS_URING_TIMEOUT (TIMEOUT_REMOVE matches by sqe->addr user_data). */
+static int uring_stage_timeout_remove(struct mjs_uring *u)
+{
+    struct io_uring_sqe *sqe = uring_get_sqe(u);
+    if (sqe == NULL)
+        return -EAGAIN;
+    sqe->opcode = IORING_OP_TIMEOUT_REMOVE;
+    sqe->addr = MJS_URING_TIMEOUT;
+    return 0;
+}
+
 /* Stage a poll_add, flushing the SQ once on queue-full (-EAGAIN); then
  * submit the batch. Never blocks. Returns 0 or negative errno. */
 static int uring_submit_poll_add(struct mjs_uring *u, int fd, int poll_mask,
@@ -657,11 +669,21 @@ int mjs_iouring_wait(mjs_uring *p, mjs_poll_event *events, unsigned cap,
         p->wake_armed = 1;
         to_submit++;
     }
-    /* Arm a bounded wait when the caller gave a timeout (and none pending). */
-    if (timeout_ns != NULL && !p->timeout_armed) {
+    /* Bounded wait armed FRESH from the caller's timeout on every call: we
+     * never reuse a previous relative deadline. A stale timeout left armed
+     * from an earlier short wait points at a dead stack timespec, so first
+     * remove it, then stage a fresh relative timeout. */
+    if (timeout_ns != NULL) {
         unsigned long long nsec = *timeout_ns;
         ts.tv_sec = (__kernel_time_t)(nsec / 1000000000ULL);
         ts.tv_nsec = (long)(nsec % 1000000000ULL);
+        if (p->timeout_armed) {
+            rc = uring_stage_timeout_remove(p);
+            if (rc != 0)
+                return rc;
+            p->timeout_armed = 0;
+            to_submit++;
+        }
         rc = uring_stage_timeout(p, &ts);
         if (rc != 0)
             return rc;
