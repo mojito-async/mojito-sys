@@ -54,8 +54,8 @@ def cb_target(userdata: UserdataPtr) abi("C"):
 comptime SENTINEL: Int = 0x5E17A1C0
 
 
-@export("mjs_abi_cb_sentinel")
-def mjs_abi_cb_sentinel(userdata: UserdataPtr) abi("C"):
+@export("cbdrv_sentinel")
+def cbdrv_sentinel(userdata: UserdataPtr) abi("C"):
     # C driver invokes us as `void (*)(void *)`: write through userdata.
     (userdata.bitcast[Int]())[] = SENTINEL
 
@@ -65,12 +65,12 @@ def mjs_abi_cb_sentinel(userdata: UserdataPtr) abi("C"):
 comptime DrvTokenPtr = UnsafePointer[Byte, MutAnyOrigin]
 
 
-@extern("mjs_abi_cbdrv_invoke")
+@extern("cbdrv_invoke")
 def cbdrv_invoke(token: DrvTokenPtr) abi("C") -> Int32:
     ...
 
 
-@extern("mjs_abi_cbdrv_invoke_corrupt")
+@extern("cbdrv_invoke_corrupt")
 def cbdrv_invoke_corrupt(token: DrvTokenPtr, mode: Int32) abi("C") -> Int32:
     ...
 
@@ -188,7 +188,7 @@ def main() raises:
     # Live callback address + sentinel cell, projected to the two C words.
     var cell = stack_allocation[1, Int]()
     cell[] = 0
-    var cb_code = entry_pointer["mjs_abi_cb_sentinel"]()
+    var cb_code = entry_pointer["cbdrv_sentinel"]()
     var live_ud = UserdataPtr(unsafe_from_address=Int(cell))
     var tok = CallbackToken.from_code_pointer(cb_code, live_ud)
     var words = stack_allocation[2, Int]()

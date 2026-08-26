@@ -9,9 +9,9 @@
  * sink" promised by issue #32 but never landed) and provides the C-side
  * invoke entry points the Mojo half drives through @extern:
  *
- *   mjs_abi_cbdrv_invoke          — cast token.addr to ms_callback and
+ *   cbdrv_invoke          — cast token.addr to ms_callback and
  *                                   invoke it with token.userdata;
- *   mjs_abi_cbdrv_invoke_corrupt  — corrupt the addr slot (mode 0: NULL,
+ *   cbdrv_invoke_corrupt  — corrupt the addr slot (mode 0: NULL,
  *                                   mode 1: a valid-but-wrong code address)
  *                                   and demonstrate a DETERMINISTIC verdict,
  *                                   never a crash.
@@ -40,7 +40,7 @@ _Static_assert(offsetof(mjs_callback_token, userdata) == 8,
  * normally and the missing sentinel is observable in plain sight. */
 static void cbdrv_benign_sink(void *userdata) { (void)userdata; }
 
-int mjs_abi_cbdrv_invoke(const mjs_callback_token *token) {
+int cbdrv_invoke(const mjs_callback_token *token) {
     if (token == NULL || token->addr == NULL) {
         return 1; /* refused: null addr slot means no callback (header M1) */
     }
@@ -50,15 +50,15 @@ int mjs_abi_cbdrv_invoke(const mjs_callback_token *token) {
     return 0;
 }
 
-int mjs_abi_cbdrv_invoke_corrupt(const mjs_callback_token *token, int mode) {
+int cbdrv_invoke_corrupt(const mjs_callback_token *token, int mode) {
     if (token == NULL || token->addr == NULL) {
         return 1;
     }
     mjs_callback_token bad = *token; /* the caller's word pair is untouched */
     if (mode == 0) {
         bad.addr = NULL; /* nullity is addr-nullity: must refuse to call */
-        return mjs_abi_cbdrv_invoke(&bad);
+        return cbdrv_invoke(&bad);
     }
     bad.addr = (void *)&cbdrv_benign_sink;
-    return mjs_abi_cbdrv_invoke(&bad);
+    return cbdrv_invoke(&bad);
 }
