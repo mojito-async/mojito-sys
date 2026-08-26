@@ -7,3 +7,6 @@
 # green — an unlisted failure blocks the commit.
 #
 # Rows are matched on the <test-name> printed by the suite (e.g. `bench`,
+# s5/ctx lane (#64): pkg consumers pin ms_context v2 shape before the
+# header + implementation land later in this PR.
+s1-tests	https://github.com/mojito-async/mojito-sys/issues/64
