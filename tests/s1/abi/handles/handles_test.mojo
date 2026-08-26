@@ -27,6 +27,24 @@ from mojito_sys.abi.handles import (
     OwnedFd,
     ms_close,  # close(2) binding reused for failure injection.
 )
+from std.memory.unsafe_pointer import UnsafePointer
+
+
+# ---------------------------------------------------------------------------
+# T7 — pointer-origin conformance (issue #45): HandlePtr must remain EXACTLY
+# spec §7.2's sketch, UnsafePointer[NoneType, MutUntrackedOrigin].  Origins
+# do not implicitly convert in Mojo, so calling assert_spec_origin with a
+# HandlePtr compiles only while the alias stays bound to the spec type; a
+# rebind to any other origin (e.g. MutAnyOrigin) fails compilation here.
+# ---------------------------------------------------------------------------
+comptime SpecHandlePtr = UnsafePointer[NoneType, MutUntrackedOrigin]
+
+
+def assert_spec_origin(p: SpecHandlePtr):
+    pass
+
+
+
 
 comptime F_DUPFD: Int32 = 0
 comptime F_GETFD: Int32 = 1
@@ -168,6 +186,16 @@ def t6_dispose_surfaces_error() -> Bool:
 
 
 def main() raises:
+    # T7 — pointer-origin conformance (issue #45): compiles only while
+    # HandlePtr stays EXACTLY UnsafePointer[NoneType, MutUntrackedOrigin]
+    # (spec §7.2 sketch); origins do not implicitly convert, so a rebind to
+    # any other origin (e.g. MutAnyOrigin) fails compilation right here.
+    # NOTE: checked inline in main, NOT via call_test — an 8-way call_test
+    # dispatch trips a mojo 1.0.0b2 miscompile that flips t2-t6 red.
+    var origin_probe = OpaqueNativeHandle()
+    assert_spec_origin(origin_probe.pointer())
+    print("t7_pointer_origin_matches_spec: PASS")
+
     var names = [
         "t1_null_handle",
         "t2_move_keeps_value",
