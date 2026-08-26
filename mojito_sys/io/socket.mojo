@@ -100,6 +100,13 @@ def _connect_pending_rc() -> Int32:
     return Int32(115)
 
 
+def _host_enametoolong() -> Int32:
+    # ENAMETOOLONG: 63 darwin / 36 Linux — overlong Unix path in to_buffer().
+    if CompilationTarget().is_macos():
+        return Int32(63)
+    return Int32(36)
+
+
 # ---- neutral sockaddr buffer geometry --------------------------------------
 # Byte layout of struct mjs_sockaddr (frozen in the header): int32 family@0,
 # uint16 port(host order)@4, pad@6, uint32 flowinfo@8, uint32 scope_id@12,
@@ -459,13 +466,18 @@ struct SocketAddress(Movable):
     # grade path, not hot). Task-aware: no.
     # Serialize into a 136-byte neutral buffer (scalar stores ONLY — this
     # pointer becomes the opaque const mjs_sockaddr* across the ABI).
-    def to_buffer(self, cell: UnsafePointer[Int64, MutAnyOrigin]):
+    def to_buffer(self, cell: UnsafePointer[Int64, MutAnyOrigin]) raises:
         var p = _buf_of(cell)
         var z = 0
         while z < SOCKADDR_BYTES:
             p[z] = Byte(0)
             z += 1
         _st_i32(p, 0, self.family)
+        # Port is a 16-bit field: reject out-of-range up front (decoded
+        # -EINVAL) rather than silently wrapping through UInt16() (panel
+        # fold — #76).
+        if self.port < 0 or self.port > 0xFFFF:
+            raise_errno(EINVAL_RC)
         _st_u16(p, 4, UInt16(self.port))
         _st_u32(p, 8, self.flowinfo)
         _st_u32(p, 12, self.scope_id)
@@ -487,8 +499,10 @@ struct SocketAddress(Movable):
                 unsafe_from_address=Int(src)
             )
             var n = len(self.path)
+            # Panel fold — #76: an overlong Unix path must FAIL LOUD (decoded
+            # -ENAMETOOLONG) rather than silently truncate into the buffer.
             if n > UNIX_PATH_MAX:
-                n = UNIX_PATH_MAX
+                raise_errno(-_host_enametoolong())
             var i = 0
             while i < n:
                 _st8(p, 32 + i, sbp[i])
