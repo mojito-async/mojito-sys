@@ -52,9 +52,14 @@ def ms_fcntl(fd: Int32, cmd: Int32, arg: Int32) abi("C") -> Int32:
 
 
 # A real open descriptor: duplicate stdin onto the caller's fixed high slot.
+# Stdin dependency (SYS-5 note): fresh_fd dups fd 0, so it FAILS on
+# daemonized runners or environments with closed/redirected stdio
+# (EBADF) — the suite requires an open fd 0.
 # fcntl(F_DUPFD) is avoided DELIBERATELY: observed mojo 1.0.0b2 miscompiles
 # early variadic F_DUPFD call sites (-1 regardless of argument validity)
 # depending on surrounding code shape; dup2 is position-independent.
+# tracking: F_DUPFD b2 miscompile — re-trial on toolchain bump (see the
+# workaround note above; drop dup2 shim if F_DUPFD ever compiles true).
 # NOTE: dup2(2) returns NEWFD on success — not 0 — so the success check
 # compares against the slot itself.
 def fresh_fd(slot: Int32) -> Int32:

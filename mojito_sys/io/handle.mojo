@@ -97,6 +97,22 @@ def ms_close(fd: Int32) abi("C") -> Int32:
     ...
 
 
+# Ownership contract (spec §25, restored from mojito_sys/abi/handles.mojo
+# on migration — issue #42):
+#   - A move (`^`) transfers ownership to the destination; the moved-from
+#     source is destroyed WITHOUT closing (ownership transfer suppresses
+#     the source destructor).
+#   - dispose()/the destructor close EXACTLY ONCE: dispose() commits the
+#     close (monotone flag + reset to NO_FD) only when close(2) reports
+#     rc == 0; on any nonzero rc the flag stays clear so the caller may
+#     retry (EINTR-safe by contract).  A repeat dispose() after success
+#     is a no-op.
+#   - detach() surrenders the descriptor to the caller without closing;
+#     the OwnedFd is then inert (is_null, is_disposed, destructor no-op).
+#
+# Thread-safety (spec §25): dispose()/__del__/detach() are NOT
+# thread-safe — callers must serialize access per instance.
+
 # ---------------------------------------------------------------------------
 # OwnedFd — owns a POSIX file descriptor; move transfers, destroy closes
 # exactly once.  (Migrated verbatim from mojito_sys/abi/handles.mojo —
@@ -137,6 +153,8 @@ struct OwnedFd(Movable):
     # dispose() is then a no-op returning 0.  On a nonzero rc (including
     # EINTR) the flag stays clear and the fd is unchanged, so the caller may
     # retry.  Destructor callers ignore the status.
+    # Blocking (SYS-5): invokes libc close(2), which MAY block (NFS
+    # leases, SO_LINGER sockets).
     def dispose(mut self) -> Int32:
         if self._disposed:
             return 0
@@ -159,6 +177,8 @@ struct OwnedFd(Movable):
     # moved-from source the compiler suppresses this destructor (ownership
     # moved to the destination), which is what makes a move a transfer.  The
     # returned status is deliberately unused on the destructor path.
+    # Blocking (SYS-5): __del__ runs dispose(), i.e. libc close(2), which
+    # MAY block (NFS leases, SO_LINGER sockets).
     def __del__(deinit self):
         _ = self.dispose()
 
@@ -166,6 +186,7 @@ struct OwnedFd(Movable):
 # ---------------------------------------------------------------------------
 # BorrowedFd — references a descriptor it does not own; never closes.
 # (Migrated verbatim from mojito_sys/abi/handles.mojo — issue #42.)
+# Blocking (SYS-5): never blocks — no syscalls, no close.
 # ---------------------------------------------------------------------------
 struct BorrowedFd:
     var fd: Int32
