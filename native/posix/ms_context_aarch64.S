@@ -37,8 +37,11 @@
 .section __TEXT,__text,regular,pure_instructions
 
 /* ---- bookkeeping (single-threaded until S5.3) -------------------------- */
+.private_extern _ms_last_from
 .zerofill __DATA,__common,_ms_last_from,8,3
+.private_extern _ms_last_to
 .zerofill __DATA,__common,_ms_last_to,8,3
+.private_extern _mjs_resume_tab
 .zerofill __DATA,__common,_mjs_resume_tab,1024,3   /* 64 entries x {ctx,ret} */
 
 .set MS_CTX_FPS_OFF, 96

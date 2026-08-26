@@ -541,8 +541,10 @@ int mjs_event_destroy(mjs_event **e);
  * allocates, moves, or frees it.
  *
  * Frozen v2 save-area layout (amendment #19 — panel-proven after silent
- * numeric-frame corruption without d8-d15 saves), part of this frozen
- * ABI; register-level backends address these slots directly:
+ * numeric-frame corruption without d8-d15 saves): Backend-pinned via
+ * _Static_asserts in ms_context.c — INTERNAL to the library,
+ * informational here, not a consumer promise; kept for the S5.2 ELF
+ * port. Register-level backends address these slots directly:
  *   168 bytes total:
  *     regs[12] @   0.. 95  x19..x28, fp(x29) @80, lr(x30) @88
  *     fps[8]   @  96..159  low 64 bits of v8..v15 (d8..d15)
@@ -557,10 +559,15 @@ int mjs_event_destroy(mjs_event **e);
  * back to the most recent switcher of ctx; resuming a finished or
  * destroyed context traps loudly (deliberate hard trap, not -errno).
  *
- * Thread-safety: contexts carry no internal locking — one thread at a
- * time per context; concurrent use of the same context must be
- * serialized by the caller. NULL context/entry arguments are caller
- * bugs where the signature cannot report them (void entry points).
+ * Thread-safety: NONE until S5.3 (#66) — bookkeeping is process-global;
+ * ALL ms_context operations in a process must occur on ONE OS thread;
+ * serializing each context separately is NOT sufficient. NULL
+ * context/entry arguments are caller bugs where the signature cannot
+ * report them (void entry points).
+ *
+ * Pre-#66 limitation: at most 64 distinct contexts may ever be resumed
+ * per process (fixed return-to table, rows never reclaimed); exceeding
+ * it traps loudly.
  *
  * Blocking (SYS-5): all of these are non-blocking. Allocation (SYS-4):
  * none.
@@ -580,8 +587,9 @@ size_t ms_context_alignment(void);
  * the stack region [stack_low, stack_low + stack_size). stack_low points
  * at the LOW end; the initial sp is stack_low + stack_size, which MUST
  * be 16-byte aligned (AAPCS64): stack_size must be a nonzero multiple of
- * 16. Returns 0 on success; -EINVAL for NULL ctx/stack_low/entry or a
- * zero / non-16-multiple stack_size, with ctx untouched. The region is
+ * 16. Returns 0 on success; -EINVAL for NULL ctx/stack_low/entry, a
+ * zero / non-16-multiple stack_size, or a stack_low that is itself not
+ * 16-byte aligned, with ctx untouched. The region is
  * NOT validated or owned here (mjs_stack_alloc is the usual provider).
  * Only this function returns int in the s5-ctx block. */
 int ms_context_init(
@@ -606,9 +614,13 @@ void ms_context_switch(
     ms_context *to
 );
 
-/* Render ctx unusable: later resumes trap loudly. Does not free the
- * caller's storage and does not touch any stack memory. Destroying a
- * currently-running context from inside itself is a caller bug. */
+/* Render ctx unusable: an exited, or destroyed-and-not-subsequently-
+ * captured, context traps loudly on resume. Capture REVIVES destroyed
+ * storage — the dead-context guard reads saved state only AFTER the
+ * save — so capture(ctx) after destroy makes ctx live again. Does not
+ * free the caller's storage and does not touch any stack memory.
+ * Destroying a currently-running context from inside itself is a
+ * caller bug. */
 void ms_context_destroy(ms_context *ctx);
 
 #ifdef __cplusplus
