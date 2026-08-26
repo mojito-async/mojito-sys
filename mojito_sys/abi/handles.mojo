@@ -36,6 +36,14 @@
 from std.memory.unsafe_pointer import UnsafePointer
 
 comptime HandlePtr = UnsafePointer[NoneType, MutUntrackedOrigin]
+#
+# Origin choice (issue #45): this is EXACTLY spec §7.2's sketch and matches
+# sibling UserdataPtr (callbacks.mojo).  MutUntrackedOrigin is correct here
+# because HandlePtr never occupies an extern out-slot — the module's only
+# @extern is ms_close(Int32).  The MutAnyOrigin out-slot doctrine documented
+# in virtual_memory.mojo/stack.mojo (an UntrackedOrigin slot load can be
+# hoisted ABOVE an opaque callee) applies only to pointers handed across an
+# extern boundary; OpaqueNativeHandle never crosses one.
 
 # Sentinel for "no descriptor" / moved-from / disposed / detached.
 comptime NO_FD: Int32 = -1
