@@ -14,9 +14,10 @@
 #     cannot be built — run `make` at the repo root first)
 #
 # Scales (deterministic at both):
-#   default        CI/Tier-0 (<2min): 25 rounds/writer, 4 bursts x 32 threads
-#   SOAK=1 env     local soak: 250 rounds/writer, 12 bursts x 32 threads
-#   e.g. MOJITO_STRESS_SOAK=1 tests/s2/stress/run.sh
+#   default        CI/Tier-0 (<2min): 25 rounds/writer, 4 bursts x 32 threads,
+#                  48 detached ghosts
+#   SOAK=1 env     local soak: 250 rounds/writer, 12 bursts x 32 threads,
+#                  192 detached ghosts
 #
 # Sanitizers: b2 cannot emit sanitizer-instrumented code for Mojo-generated
 # objects, so an ASan/TSan run of the DRIVER is not expressible with this

@@ -48,3 +48,8 @@ def c_exit(code: Int32) abi("C"):
 @extern("sched_yield")
 def c_sched_yield() abi("C") -> Int32:
     ...
+
+
+@extern("clock_gettime")
+def c_clock_gettime(clk_id: Int32, tp: WordPtr) abi("C") -> Int32:
+    ...
