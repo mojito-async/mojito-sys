@@ -20,14 +20,17 @@
  *   fps[0..7]   @  96..159 => low 64 bits of xmm6..xmm13
  *   sp          @ 160
  *
- * x86-64 System V callee-saved set: rbx, rbp, r12-r15 (GPRs) and
- * xmm6-xmm15 (XMM/SIMD). The frozen v2 fps bank holds only 8 slots, so
- * xmm6..xmm13 are preserved; xmm14/xmm15 are NOT preservable within the
- * frozen 200-byte record — a declared, documented capacity limitation of
- * the fast prefix (the RECORD cannot grow without breaking the frozen
- * ABI, which is immutable here). A switch must not rely on xmm14/xmm15
- * surviving across it on this backend.
- *
+ * !!! BACKEND SUPPORT STATUS — READ LOUDLY !!!: this x86-64 SysV backend is
+ * NOT NativeContext-supported yet (spec §38.6). Native support requires FULL
+ * 128-bit preservation of the entire SysV callee-saved SIMD set — xmm14 and
+ * xmm15 are still omitted because the frozen fps bank holds only 8 low-64
+ * slots (x86-64 System V diverges from AAPCS64 here: AAPCS64 needs d8-d15,
+ * exactly 8 low-64 halves, whereas SysV callees own xmm6-xmm15 in FULL 128
+ * bits). Until that upgrade lands along with a passing in-repo conformance
+ * suite, this backend is a cross-assembled STRUCTURAL mirror only — drivers
+ * must not ship production state transitions on it. Verified smoke:
+ * tests/s5/x86/run.sh (assembles cleanly; behavioral rows are RED-EXCLUDED
+ * UNSUPPORTED-PLATFORM until a Linux/x86_64 runner).
  * x18-equivalent: x86-64 has no platform-reserved GP register analogous
  * to AArch64 x18; nothing needs avoiding. Only temporaries rax/rcx/rdx/
  * r8-r11 are used by the backend.
@@ -40,6 +43,9 @@
  *   #0x69  resume of a RUNNING context (concurrent re-resume);
  *   #0x6a  trampoline fall-through guard — control must NEVER fall
  *          through the switch-out (spec §22 L1173).
+ *   #0x6b  restored sp slot not 16-aligned at switch time — corruption
+ *          trapped BEFORE the misaligned stack is committed (mirrors the
+ *          make-time #0x64 class; SysV rsp MUST be ≡0 mod 16 at entry).
  *
  * Red-zone rule (spec §21): the switch never touches memory below the
  * saved sp, so it never clobbers a callee's red zone.
@@ -189,9 +195,17 @@ MS_SYM(ms_context_switch):
         movq    (MS_CTX_FPS_OFF+24)(%rsi), %xmm9
         movq    (MS_CTX_FPS_OFF+32)(%rsi), %xmm10
         movq    (MS_CTX_FPS_OFF+40)(%rsi), %xmm11
-        movq    (MS_CTX_FPS_OFF+48)(%rsi), %xmm12
-        movq    (MS_CTX_FPS_OFF+56)(%rsi), %xmm13
-        movq    (MS_CTX_SP_OFF)(%rsi), %rsp    /* sp last; ret pops target */
+        /* restored-sp 16-alignment trap (#0x6b, mirroring make #0x64): a
+         * misaligned sp slot means the caller's make/capture stack is
+         * corrupt — SysV requires rsp ≡ 0 (mod 16) at callee entry, and
+         * the trampoline prologue + every `call` rely on the invariant
+         * (see the alignment note above). Test the low 4 bits BEFORE the
+         * mov that commits it; int3 on violation so a debugger can catch
+         * it at the source instead of inheriting a misaligned stack. */
+        movq    (MS_CTX_SP_OFF)(%rsi), %rax    /* load saved sp to test */
+        testq   $15, %rax
+        jnz     .Ltrap_unaligned_sp             /* rsp not 16-aligned: trap */
+        movq    %rax, %rsp                      /* sp last; ret pops target */
         ret
 
         /* Self-switch (ms_context_capture): the just-saved snapshot IS
@@ -213,6 +227,9 @@ MS_SYM(ms_context_switch):
 .Ltrap_running:
         movl    $0x69, %eax
         int3                                    /* re-resume of RUNNING ctx */
+.Ltrap_unaligned_sp:
+        movl    $0x6b, %eax
+        int3                                    /* restored sp not 16-aligned */
 MS_FUNC_END(ms_context_switch)
 
 /* ------------------------------------------------------------------------ */
