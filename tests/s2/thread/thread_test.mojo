@@ -55,7 +55,7 @@ from mojito_sys.thread.thread import (
     no_name,
     set_current_thread_name,
     spawn_native_thread,
-    thread_spawn_args,
+    thread_fill_name_cell,
 )
 
 # Int64-pointer view of the shared scratch cells (userdata payload layout:
@@ -206,8 +206,12 @@ def main() raises:
     while pi < NameBufBytes:
         poison[pi] = 0xAA
         pi += 1
-    var nargs = thread_spawn_args(ThreadOptions(name="mojito-t22"))
-    var named = spawn_native_thread(name_ptr, ud, nargs[0], nargs[1])
+    var opts = ThreadOptions(name="mojito-t22")
+    opts.validate()
+    var ncell = stack_allocation[16, Byte]()
+    var named = spawn_native_thread(
+        name_ptr, ud, opts.stack_size, thread_fill_name_cell(opts, ncell),
+    )
     var nst = named.join()
     var expected = String("mojito-t22")
     var exp_buf = stack_allocation[16, Byte]()
@@ -225,13 +229,12 @@ def main() raises:
     # ---- 5b. overlong name rejected with ENAMETOOLONG ------------------------
     var toolong_ok = True
     try:
-        var oargs = thread_spawn_args(
-            ThreadOptions(name="way-too-long-thread-name")
-        )
-        _ = spawn_native_thread(counter_ptr, ud, oargs[0], oargs[1])
+        var bad = ThreadOptions(name="way-too-long-thread-name")
+        bad.validate()
         toolong_ok = False  # must have raised
     except e:
-        toolong_ok = contains(String(e), "errno 63")  # darwin ENAMETOOLONG
+        # decoded NAME, never the numeric spelling (host-portable)
+        toolong_ok = contains(String(e), "ENAMETOOLONG")  # darwin ENAMETOOLONG
     if not check("T2.2 >15-char name raises ENAMETOOLONG", toolong_ok):
         failed += 1
 
