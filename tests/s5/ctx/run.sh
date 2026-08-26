@@ -260,5 +260,33 @@ if [ "$failures" -ne 0 ]; then
     echo "RESULT: $failures FAILED"
     exit 1
 fi
+
+# ---- issue #67 additions -------------------------------------------------
+echo ""
+echo "== s5_ctx_api rows (issue #67)"
+arows=""
+# Pure-Mojo NativeContext API (mojito_sys/ctx) over the frozen ms_context_*
+# ABI: create/capture/switch two contexts, exactly-once finish hook,
+# destroy + DEAD/FINISHED/RUNNING misuse raising, misaligned-creation
+# rejection, re-capture revival — against the packaged dylib via `mojo run`.
+out=$(sh "$SCRIPT_DIR/api/run.sh" 2>&1)
+st=$?
+printf '%s\n' "$out" | sed 's/^/   | /'
+if [ $st -eq 0 ] && printf '%s' "$out" | grep -q "RESULT: all green"; then
+    arows="$arows api-mojo PASS
+"
+else
+    arows="$arows api-mojo FAIL
+"
+    failures=$((failures + 1))
+fi
+
+echo ""
+echo "S5 ctx issue-#67 matrix"
+echo "$arows" | sed 's/^/  /'
+if [ "$failures" -ne 0 ]; then
+    echo "RESULT: $failures FAILED"
+    exit 1
+fi
 echo "RESULT: all green"
 exit 0
