@@ -438,6 +438,91 @@ int mjs_atomic_wake_one_u32(uint32_t *addr);
  * (SYS-5). Allocation: none (SYS-4). Task-aware: no. */
 int mjs_atomic_wake_all_u32(uint32_t *addr);
 
+
+/* --- s3-event --- */
+/*
+ * S3.5 native event (issue #61, spec §17). Same return-value contract
+ * as above: 0 == success; negative == -errno; out-params UNTOUCHED on
+ * failure.
+ *
+ * WAKE SEMANTICS (NORMATIVE — spec §17 leaves breadth and stickiness
+ * open; this ABI pins them):
+ *   NativeEvent is an AUTO-RESET, BREADTH-ONE event. The event holds at
+ *   most ONE pending token. mjs_event_signal stores a token (0 -> 1)
+ *   and wakes at most one parked waiter; when no one waits the token
+ *   STICKS so exactly one later wait completes without blocking.
+ *   Signals issued while a token is already pending COALESCE: five
+ *   signals with no waiter release exactly one future wait. A
+ *   successful wait/wait_until CONSUMES the token; every other waiter
+ *   keeps sleeping until the next signal. Fairness is not promised:
+ *   a fresh arrival may consume the token ahead of an already-woken
+ *   waiter that has not yet reacquired the internal mutex.
+ *
+ * Handle lifetime: identical to the s3-mutex / s3-condvar model —
+ *   mjs_event_init yields an owned opaque handle in *out;
+ *   mjs_event_destroy CONSUMES it (*e NULLed on success); any use of a
+ *   consumed or NULL handle is a deterministic -EINVAL. Destroying an
+ *   event while threads still wait on it is a caller bug (undefined);
+ *   the caller must join its waiters first.
+ *
+ * IMPLEMENTATION COMPOSITION + FUTURE FAST PATH: this layer composes
+ * the portable s3-mutex + s3-condvar primitives (one internal mutex,
+ * one internal condvar pinned per the s3-condvar clock domain, one
+ * int token). The atomic-wait layer has landed on main (#59/#60); the
+ * uncontended fast path slots into exactly two places WITHOUT changing
+ * this ABI:
+ *   - wait/wait_until: an atomic acquire-load of the token short-
+ *     circuits the mutex+condvar park when a token is already visible;
+ *     the slow path becomes mjs_atomic_wait_u32(&e->token, 0, ...).
+ *   - signal: store-release of the token plus
+ *     mjs_atomic_wake_u32_one(&e->token) replaces the internal
+ *     lock/cv_signal pair.
+ *
+ * Blocking (SYS-5): wait blocks the calling OS thread until a token is
+ *   available or the deadline expires; signal wakes but never waits;
+ *   init/destroy block only insofar as malloc and the composed
+ *   pthread primitives do.
+ * Allocation (SYS-4): one fixed-size handle at init; NONE afterwards.
+ * Task-aware: no — OS-thread granularity per spec §14.
+ */
+
+/* Opaque native event handle (SYS-3). */
+typedef struct mjs_event mjs_event;
+
+/* Create an event in the no-token state. On success returns 0 and
+ * stores the handle in *out; NULL out-slot is -EFAULT with *out
+ * untouched. */
+int mjs_event_init(mjs_event **out);
+
+/* Block the calling OS thread until a token is available, then consume
+ * it. A pre-stored token completes immediately. */
+int mjs_event_wait(mjs_event *e);
+
+/* As wait, bounded by an ABSOLUTE monotonic deadline in ns (same
+ * domain as mjs_clock_now). Returns 0 once a token was consumed,
+ * -ETIMEDOUT once the deadline passes (a STATUS like try_lock's
+ * -EBUSY), another negative on error. A deadline already in the past
+ * returns -ETIMEDOUT without blocking unless a token is pending.
+ *
+ * EXPIRY PARITY: a waiter that observes -ETIMEDOUT re-checks the token
+ * under the internal lock before returning; a token visible at that
+ * re-check is CONSUMED and 0 returned — wake beats timeout, exactly
+ * like mjs_atomic_wait_on_u32. -ETIMEDOUT with a token still pending
+ * afterwards is a contract violation. */
+int mjs_event_wait_until(mjs_event *e, uint64_t deadline_ns);
+
+/* Store one token (if none pending) and wake at most one waiter.
+ * Coalesces while a token is already pending (see block comment).
+ * Non-blocking (SYS-5); NULL handle -EINVAL. */
+int mjs_event_signal(mjs_event *e);
+
+/* Destroy the event and free its handle: *e is NULLed on success, so
+ * any later use (including a second destroy) is a deterministic
+ * -EINVAL. On failure the handle is NOT consumed. NULL or NULLed *e is
+ * -EINVAL. */
+int mjs_event_destroy(mjs_event **e);
+
+
 #ifdef __cplusplus
 }
 #endif
