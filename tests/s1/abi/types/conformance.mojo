@@ -22,7 +22,7 @@ from mojito_sys.abi.types import (
     c_uchar, c_ushort, c_uint, c_ulong, c_ulong_long,
     c_size_t, c_ssize_t, c_float, c_double, c_pid_t,
     c_int8, c_uint8, c_int16, c_uint16, c_int32, c_uint32,
-    c_int64, c_uint64, c_intptr_t, c_uintptr_t, c_bool,
+    c_int64, c_uint64, c_intptr_t, c_uintptr_t, c_bool, c_socklen_t,
     CTypeSizes,
 )
 
@@ -70,6 +70,7 @@ def main() raises:
     var v_iptr: c_intptr_t = c_intptr_t(12)
     var v_uiptr: c_uintptr_t = c_uintptr_t(12)
     var v_bool: c_bool = c_bool(True)
+    var v_skl: c_socklen_t = c_socklen_t(13)
 
     # 1. type-usable: construct and re-read every alias
     total += 1
@@ -144,6 +145,9 @@ def main() raises:
     total += 1
     if not check("type-usable bool", v_bool == True):
         fails += 1
+    total += 1
+    if not check("type-usable socklen-t", Int(v_skl) == 13):
+        fails += 1
 
     # 2. width oracle reads the ALIAS dtype (review H1) — LP64 table
     total += 1
@@ -189,6 +193,9 @@ def main() raises:
     if not check("width pid-t 4", CTypeSizes.pid_t() == 4):
         fails += 1
     total += 1
+    if not check("width socklen-t 4", CTypeSizes.socklen() == 4):
+        fails += 1
+    total += 1
     if not check("width bool 1", CTypeSizes.bool() == 1):
         fails += 1
 
@@ -225,6 +232,9 @@ def main() raises:
         fails += 1
     total += 1
     if not check("conv pid-t 4b", Int(c_pid_t(C32)) == 0):
+        fails += 1
+    total += 1
+    if not check("conv socklen-t 4b", Int(c_socklen_t(C32)) == 0):
         fails += 1
     total += 1
     if not check("conv char 1b", Int(c_char(0x1FF)) == -1):
