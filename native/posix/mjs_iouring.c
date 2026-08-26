@@ -203,8 +203,10 @@ static int uring_submit(struct mjs_uring *u, unsigned min_complete,
 
     if (pending == 0u && min_complete == 0u)
         return 0;
-    *u->sq_tail = u->sqe_tail;
+    /* io_uring protocol: release barrier BEFORE publishing sq_tail so the
+     * kernel sees all prior SQE writes before the tail store. */
     __sync_synchronize();
+    *u->sq_tail = u->sqe_tail;
     return ioring_enter(u->ring_fd, pending, min_complete, flags);
 }
 
@@ -543,6 +545,10 @@ static int uring_drain_cq(struct mjs_uring *p, mjs_poll_event *events,
     uint32_t cq_head = p->cqe_head;
     uint32_t tail = *p->cq_tail;
     unsigned filled = 0;
+
+    /* io_uring protocol: acquire barrier after reading cq_tail, before
+     * dereferencing the CQEs the kernel produced. */
+    __sync_synchronize();
 
     while (cq_head != tail) {
         struct io_uring_cqe *cqe = &p->cqes[cq_head & *p->cq_mask];
