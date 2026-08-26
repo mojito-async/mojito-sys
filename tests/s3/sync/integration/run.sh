@@ -5,6 +5,13 @@
 # repo-convention audits (audit_sync.sh), plus a package-path import
 # check for the whole S3 surface.
 #
+# DEFERRED (issue #62 phase close): the §14 NativeSemaphore
+# permit-accounting leg is NOT covered by this suite — no lane, conformance
+# row, or audit exists for it repo-wide. Explicitly deferred at the S3
+# batch-panel review; tracked by a dedicated follow-up issue (filed
+# separately when #62 closes). Do not treat the S3 phase as covering
+# semaphores.
+#
 # Rows:
 #   s3-integration-mojo     — bounded buffer 8x8x100k + 50k park/unpark
 #                             churn + cross-primitive wrapper decode
@@ -112,6 +119,7 @@ fi
 
 echo ""
 echo "S3.6 sync integration + phase audit matrix (issue #62)"
+echo "  s3-semaphore-permits DEFERRED (§14 permit-accounting leg; follow-up issue)"
 printf '%s' "$matrix" | sed 's/^/  /'
 case "$matrix" in
     *FAIL*)
