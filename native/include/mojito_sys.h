@@ -523,6 +523,106 @@ int mjs_event_signal(mjs_event *e);
 int mjs_event_destroy(mjs_event **e);
 
 
+/* --- s5-ctx --- */
+/*
+ * S5.1 native contexts (issue #64, spec §20.2): stackful cooperative
+ * contexts switched at the callee-saved register level. Same additive-
+ * only regime as every block above; MOJITO_SYS_ABI_VERSION stays 1.
+ *
+ * Return-value contract: ms_context_init is the ONLY errno-style entry
+ * point in this block (0 == success; negative == -errno). It takes no
+ * out-parameters; on failure the caller's context storage is left
+ * untouched (uninitialized). capture/switch/destroy are void and cannot
+ * fail.
+ *
+ * Context storage: a context is CALLER-OWNED storage of
+ * ms_context_size() bytes with ms_context_alignment() alignment (a
+ * struct member, heap block, or stack slot all work). The library never
+ * allocates, moves, or frees it.
+ *
+ * Frozen v2 save-area layout (amendment #19 — panel-proven after silent
+ * numeric-frame corruption without d8-d15 saves): Backend-pinned via
+ * _Static_asserts in ms_context.c — INTERNAL to the library,
+ * informational here, not a consumer promise; kept for the S5.2 ELF
+ * port. Register-level backends address these slots directly:
+ *   168 bytes total:
+ *     regs[12] @   0.. 95  x19..x28, fp(x29) @80, lr(x30) @88
+ *     fps[8]   @  96..159  low 64 bits of v8..v15 (d8..d15)
+ *     sp       @ 160       saved stack pointer
+ * A switch saves/restores exactly these plus sp; nothing else. Backends
+ * NEVER write x18 (platform-reserved on Apple platforms).
+ *
+ * Synthetic entry: ms_context_init prepares ctx so its first resume
+ * lands on an internal trampoline that calls entry(userdata) with a
+ * 16-byte-aligned sp (AAPCS64 at function entry). userdata is passed
+ * through UNMODIFIED. When entry returns, control switches permanently
+ * back to the most recent switcher of ctx; resuming a finished or
+ * destroyed context traps loudly (deliberate hard trap, not -errno).
+ *
+ * Thread-safety: NONE until S5.3 (#66) — bookkeeping is process-global;
+ * ALL ms_context operations in a process must occur on ONE OS thread;
+ * serializing each context separately is NOT sufficient. NULL
+ * context/entry arguments are caller bugs where the signature cannot
+ * report them (void entry points).
+ *
+ * Pre-#66 limitation: at most 64 distinct contexts may ever be resumed
+ * per process (fixed return-to table, rows never reclaimed); exceeding
+ * it traps loudly.
+ *
+ * Blocking (SYS-5): all of these are non-blocking. Allocation (SYS-4):
+ * none.
+ */
+
+typedef struct ms_context ms_context;
+typedef void (*ms_context_entry)(void *);
+
+/* Sideband geometry of the caller-owned save area (see layout above).
+ * Compile-time constants surfaced as functions so consumers can bind
+ * them without knowing the backend. size == 168, alignment == 8. */
+size_t ms_context_size(void);
+size_t ms_context_alignment(void);
+
+/* Prepare ctx (caller-owned storage of ms_context_size() bytes,
+ * ms_context_alignment()-aligned) to resume at entry(userdata) on top of
+ * the stack region [stack_low, stack_low + stack_size). stack_low points
+ * at the LOW end; the initial sp is stack_low + stack_size, which MUST
+ * be 16-byte aligned (AAPCS64): stack_size must be a nonzero multiple of
+ * 16. Returns 0 on success; -EINVAL for NULL ctx/stack_low/entry, a
+ * zero / non-16-multiple stack_size, or a stack_low that is itself not
+ * 16-byte aligned, with ctx untouched. The region is
+ * NOT validated or owned here (mjs_stack_alloc is the usual provider).
+ * Only this function returns int in the s5-ctx block. */
+int ms_context_init(
+    ms_context *ctx,
+    void *stack_low,
+    size_t stack_size,
+    ms_context_entry entry,
+    void *userdata
+);
+
+/* Save the CURRENT execution state into ctx: a later
+ * ms_context_switch(to = ctx) resumes just after this call. Capturing a
+ * context that is already live (initialized/captured but not finished)
+ * overwrites its saved state. */
+void ms_context_capture(ms_context *ctx);
+
+/* Save the current state into `from` and resume `to`. Switching is
+ * allocation-free (spec §20.1). Resuming a finished or destroyed context
+ * traps loudly. */
+void ms_context_switch(
+    ms_context *from,
+    ms_context *to
+);
+
+/* Render ctx unusable: an exited, or destroyed-and-not-subsequently-
+ * captured, context traps loudly on resume. Capture REVIVES destroyed
+ * storage — the dead-context guard reads saved state only AFTER the
+ * save — so capture(ctx) after destroy makes ctx live again. Does not
+ * free the caller's storage and does not touch any stack memory.
+ * Destroying a currently-running context from inside itself is a
+ * caller bug. */
+void ms_context_destroy(ms_context *ctx);
+
 #ifdef __cplusplus
 }
 #endif
