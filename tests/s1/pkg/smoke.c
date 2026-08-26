@@ -38,10 +38,27 @@ static int (*const p_stack_alloc)(size_t, size_t, size_t, void **, void **,
                                   size_t *) = mjs_stack_alloc;
 static int (*const p_stack_free)(void **) = mjs_stack_free;
 
+/* --- s5-ctx (issue #64): frozen ms_context v2 ABI shape. Same
+ * void (*)(void *) callback shape as ms_callback; init is the ONLY
+ * errno-returning entry point in the block. */
+static ms_context_entry const s5_entry_ok = s1_cb_sink;
+static size_t (*const p_ctx_size)(void) = ms_context_size;
+static size_t (*const p_ctx_alignment)(void) = ms_context_alignment;
+static int (*const p_ctx_init)(ms_context *, void *, size_t,
+                               ms_context_entry, void *) = ms_context_init;
+static void (*const p_ctx_capture)(ms_context *) = ms_context_capture;
+static void (*const p_ctx_switch)(ms_context *, ms_context *) =
+    ms_context_switch;
+static void (*const p_ctx_destroy)(ms_context *) = ms_context_destroy;
+
+
 /* Keep every guard live so none can be elided as dead initializers. */
 void *const s1_shape_refs[] = {
     (void *)p_page_size,   (void *)p_granularity, (void *)p_abi_version,
     (void *)p_vm_reserve,  (void *)p_vm_commit,   (void *)p_vm_decommit,
     (void *)p_vm_protect,  (void *)p_vm_release,  (void *)p_stack_alloc,
     (void *)p_stack_free,  (void *)s1_cb_ok,
+    (void *)s5_entry_ok,   (void *)p_ctx_size,    (void *)p_ctx_alignment,
+    (void *)p_ctx_init,    (void *)p_ctx_capture, (void *)p_ctx_switch,
+    (void *)p_ctx_destroy,
 };
