@@ -82,7 +82,7 @@ check_metric() { # <name> <fresh_value>
         return
     fi
     case "$pred" in
-        gt *)
+        gt\ *)
             limit=${pred#gt }
             if ! printf '%s' "$limit" | grep -qE '^[0-9]+$'; then
                 say_reg "bad predicate for '$name': '$pred'"
@@ -97,7 +97,7 @@ check_metric() { # <name> <fresh_value>
                     "$name" "$fresh" "$baseline" "$limit"
             fi
             ;;
-        lt *)
+        lt\ *)
             limit=${pred#lt }
             if ! printf '%s' "$limit" | grep -qE '^[0-9]+$'; then
                 say_reg "bad predicate for '$name': '$pred'"
