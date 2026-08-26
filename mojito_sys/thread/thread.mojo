@@ -387,6 +387,9 @@ def thread_fill_name_cell(
 # `unsafe_from_address=0` literals, so the zero travels through a runtime
 # local). Public because spawn_native_thread() takes the name cell
 # explicitly per the WORKAROUND-documented scalar spawn surface.
+# Blocking: no (SYS-5) — pure constant, no host call.
+# Allocation: none (SYS-4).
+# Task-aware: no.
 def no_name() -> NamePtr:
     return _null_name()
 
