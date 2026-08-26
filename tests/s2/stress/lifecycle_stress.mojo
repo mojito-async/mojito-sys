@@ -3,14 +3,14 @@
 # §38.5 jcstress actor/outcome methodology L1873-1875 and the S1.9 #31
 # harness conventions).
 #
-# Three deterministic phases over the merged S2 surface (mjs_thread_* via
+# Four deterministic phases over the merged S2 surface (mjs_thread_* via
 # mojito_sys.thread.externs probes; mjs_tls_* via NativeTlsKey):
 #
 #   A. SPAWN/JOIN STORM — 8 concurrent writer threads x N rounds each spawn a
 #      leaf child and join it. Every child performs TLS slot churn under one
 #      shared counting-destructor key: bind its OWN payload cell, read it
-#      back (round-trip), then either leave it bound (even rounds) or clear
-#      it first (odd rounds). POSIX semantics: the destructor fires EXACTLY
+#      back (round-trip), then either leave it bound (odd rounds) or clear
+#      it first (even rounds). POSIX semantics: the destructor fires EXACTLY
 #      ONCE per binding still bound at child exit and never for cleared
 #      values, so destructor accounting is exact arithmetic, not a heuristic.
 #
@@ -32,8 +32,17 @@
 #      threads == bursts*32 with zero lost wakes, zero double-join misses.
 #      Any drift is a lost update / double-consume / missed wake and FAILS.
 #
+#   D. DETACHED-EXIT x TLS-DTOR GHOST STORM — G detached children churn
+#      set/round-trip/clear cycles on the shared key, then deliberately exit
+#      with one binding still BOUND: the counting dtor must fire EXACTLY
+#      once per ghost into the shared ledger. No join exists for a detached
+#      child, so main reconciles by bounded polling (same TIMEOUT detector
+#      as phase B) instead of a join sync point.
+#
 # Determinism: counts are fixed, no sleeps gate any assertion (the only
-# yield points are pthread create/join and the barrier itself); the suite is
+# yield points are pthread create/join, the barrier spin and the ghost poll,
+# all under a bounded-yield budget that records a TIMEOUT outcome cell and
+# fails the suite instead of hanging); the suite is
 # pass/fail exact at both scales:
 #   default (CI, Tier-0 budget <2min): N=25 rounds/writer, 4 bursts;
 #   MOJITO_STRESS_SOAK=1 (local):      N=250 rounds/writer, 12 bursts.
@@ -60,11 +69,20 @@
 from std.memory import stack_allocation
 from std.sys.intrinsics import inlined_assembly
 
-from fx_externs import c_exit, c_getenv, c_sched_yield, fx_add, fx_load, fx_store
+from fx_externs import (
+    c_clock_gettime,
+    c_exit,
+    c_getenv,
+    c_sched_yield,
+    fx_add,
+    fx_load,
+    fx_store,
+)
 from mojito_sys.thread.externs import (
     CThreadEntry,
     NamePtr,
     UserdataPtr,
+    probe_detach,
     probe_join,
     probe_spawn,
 )
@@ -84,6 +102,29 @@ comptime ROUNDS_SOAK = 250    # children per writer, local soak scale
 comptime BURSTS_CI = 4        # barrier bursts, CI/Tier-0 scale
 comptime BURSTS_SOAK = 12     # barrier bursts, local soak scale
 comptime BURST_N = 32         # spec-fixed burst width
+comptime GHOSTS_CI = 48       # detached ghost children, CI/Tier-0 scale
+comptime GHOSTS_SOAK = 192    # detached ghost children, local soak scale
+comptime CHURN_CYCLES = 4     # set/get/clear cycles per ghost, both scales
+comptime WAIT_SECONDS = 60   # wall-clock cap per barrier spin / ghost poll
+
+
+# ---- bounded-yield deadline helpers (TIMEOUT detector) -----------------------
+
+# Absolute deadline cell (epoch seconds; CLOCK_REALTIME id=0) `secs` from now.
+def deadline_seconds(secs: Int64) -> WordPtr:
+    var tp = stack_allocation[2, Int64]()
+    _ = c_clock_gettime(Int32(0), tp)
+    tp[0] = tp[0] + secs
+    return tp
+
+
+# True once the wall clock is past the deadline in `dl` (1s granularity —
+# plenty for a hang detector, and immune to yield-cost variance under load).
+def past_deadline(dl: WordPtr) -> Bool:
+    var now = stack_allocation[2, Int64]()
+    _ = c_clock_gettime(Int32(0), now)
+    return now[0] > dl[0]
+
 
 # ---- outcome-ledger shard layout (SHARD cells per writer) -------------------
 
@@ -104,6 +145,21 @@ comptime WC_ROUNDS = 1
 comptime WC_SHARD = 2
 comptime WC_ENTRY = 3
 comptime WC_CELLS = 4
+
+# ---- ghost ledger cells (shared, phase D) ------------------------------------
+
+comptime DG_ROUNDTRIP_OK = 0
+comptime DG_ROUNDTRIP_BAD = 1
+comptime DG_SET_FAIL = 2
+comptime DG_DTOR_OBSERVED = 3
+comptime DG_CELLS = 4
+
+# ---- ghost argument cells (read-only, one shared work order) -----------------
+
+comptime GD_KEY = 0
+comptime GD_LEDGER = 1
+comptime GD_CYCLES = 2
+comptime GD_CELLS = 3
 
 # ---- work-order cells (carved per round by the writer, read by the child) ---
 
@@ -126,7 +182,8 @@ comptime BA_CELLS = 4
 
 comptime BS_COUNT = 0
 comptime BS_GEN = 1
-comptime BS_CELLS = 2
+comptime BS_TIMEOUT = 2
+comptime BS_CELLS = 3
 
 # Frozen ABI consumed-handle misuse code (deterministic -EINVAL).
 comptime RC_EINVAL = Int32(-22)
@@ -182,13 +239,13 @@ def soak_enabled() -> Bool:
 
 # ---- exported actors --------------------------------------------------------
 
-# Counting TLS destructor (ms_callback shape): increments the Int64 cell the
-# dying binding points at. Accounting lives IN THE PAYLOAD, never in a
+# Counting TLS destructor (ms_callback shape): ATOMICALLY increments the
+# Int64 cell the dying binding points at — safe even when many detached
+# ghosts share one ledger cell. Accounting lives IN THE PAYLOAD, never in a
 # global — exactly the tls_test.mojo payload protocol.
 @export("s28_counting_dtor")
 def counting_dtor(value: TlsValuePtr) abi("C"):
-    var cell = value.bitcast[Int64]()
-    cell[] = cell[] + 1
+    _ = fx_add(value.bitcast[Int64](), 1)
 
 
 # Leaf child of phase A: one TLS churn cycle. Non-raising; every observable
@@ -268,7 +325,20 @@ def burst_entry(ud: UserdataPtr) abi("C") -> Int64:
         fx_store(bs + BS_COUNT, 0)
         _ = fx_add(bs + BS_GEN, 1)
     else:
+        # Bounded-yield budget: an ADDITIONAL failure detector, not a
+        # relaxation — every participant still waits for ITS OWN generation
+        # bump (rendezvous semantics untouched); a release that never comes
+        # is recorded as a TIMEOUT outcome cell and a nonzero exit instead
+        # of a silent hang.
+        var dl = deadline_seconds(WAIT_SECONDS)
+        var waits = 0
         while fx_load(bs + BS_GEN) == gen:
+            waits += 1
+            if waits == 1024 and past_deadline(dl):
+                _ = fx_add(bs + BS_TIMEOUT, 1)
+                return Int64(1)
+            if waits == 1024:
+                waits = 0
             _ = c_sched_yield()
     slot[0] = fx_load(bs + BS_GEN)
     var set_rc = mjs_tls_set(key_id, ptr_at(payload_addr))
@@ -277,6 +347,37 @@ def burst_entry(ud: UserdataPtr) abi("C") -> Int64:
     if set_rc == 0 and Int(got) == payload_addr:
         ok = 1
     slot[1] = Int64(ok)
+    return 0
+
+
+# Phase-D ghost: DETACHED child (never joined). Churns CHURN_CYCLES
+# set/round-trip/clear cycles into the shared ghost ledger, then exits with
+# one binding deliberately still BOUND — the atomic counting dtor must fire
+# EXACTLY once at detached exit. Non-raising; outcomes travel through
+# fx_add only, since no join ever synchronizes with this frame.
+@export("s28_ghost_entry")
+def ghost_entry(ud: UserdataPtr) abi("C") -> Int64:
+    var key_id = UInt(ud[GD_KEY])
+    var dg = word_ptr(Int(ud[GD_LEDGER]))
+    var cycles = ud[GD_CYCLES]
+    var k = 0
+    while k < Int(cycles):
+        var payload = stack_allocation[1, Int64]()
+        payload[0] = 0
+        if mjs_tls_set(key_id, ptr_at(Int(payload))) != 0:
+            _ = fx_add(dg + DG_SET_FAIL, 1)
+        elif Int(mjs_tls_get(key_id)) != Int(payload):
+            _ = fx_add(dg + DG_ROUNDTRIP_BAD, 1)
+        else:
+            _ = fx_add(dg + DG_ROUNDTRIP_OK, 1)
+        if mjs_tls_set(key_id, null_value()) != 0:
+            _ = fx_add(dg + DG_SET_FAIL, 1)
+        k += 1
+    # The final binding points AT the shared DG_DTOR_OBSERVED cell (not a
+    # private payload): nobody can read a dead detached frame, so the dtor
+    # must deliver its exactly-once increment straight into the ledger.
+    if mjs_tls_set(key_id, ptr_at(Int(dg + DG_DTOR_OBSERVED))) != 0:
+        _ = fx_add(dg + DG_SET_FAIL, 1)
     return 0
 
 
@@ -405,6 +506,7 @@ def main() raises:
     # ================= phase B: 32-way barrier spawn bursts ==================
     var bs = stack_allocation[BS_CELLS, Int64]()
     bs[BS_COUNT] = 0
+    bs[BS_TIMEOUT] = 0
     bs[BS_GEN] = 0
     var joined_total = 0
     var lost_wakes = 0
@@ -415,6 +517,10 @@ def main() raises:
     var burst_ep = entry_pointer["s28_burst_entry"]()
     var b = 0
     while b < bursts:
+        # Panel MUST-FOLD: re-zero the barrier arrival count at the START of
+        # every burst so a straggler's late fetch_add can never leak into
+        # the next burst's rendezvous (premature 32nd-arrival release).
+        fx_store(bs + BS_COUNT, 0)
         var payloads = stack_allocation[BURST_N, Int64]()
         var slots = stack_allocation[BURST_N * 2, Int64]()
         var barg = stack_allocation[BURST_N * BA_CELLS, Int64]()
@@ -497,10 +603,73 @@ def main() raises:
     if burst_spawn_fail != 0:
         failed += 1
         print("S2-STRESS FAIL: burst spawn failures: ", burst_spawn_fail)
+    if bs[BS_TIMEOUT] != 0:
+        failed += 1
+        print(
+            "S2-STRESS FAIL: barrier yield-budget TIMEOUT outcome recorded:",
+            bs[BS_TIMEOUT],
+        )
 
-    # Key teardown: every binding was drained above (POSIX: a destructor does
-    # not fire for values still bound at key destruction — the exact
-    # reconciliation already proves none remain).
+    # ========= phase D: detached-exit x TLS-dtor ghost storm =================
+    var ghosts = GHOSTS_CI
+    if soak:
+        ghosts = GHOSTS_SOAK
+    var dg = stack_allocation[DG_CELLS, Int64]()
+    i = 0
+    while i < DG_CELLS:
+        dg[i] = 0
+        i += 1
+    var garg = stack_allocation[GD_CELLS, Int64]()
+    garg[GD_KEY] = Int64(Int(key.key))
+    garg[GD_LEDGER] = Int64(Int(dg))
+    garg[GD_CYCLES] = Int64(CHURN_CYCLES)
+    var ghost_ep = entry_pointer["s28_ghost_entry"]()
+    var ghslot = stack_allocation[1, Int64]()
+    var ghost_spawn_fail = 0
+    var ghost_detach_fail = 0
+    i = 0
+    while i < ghosts:
+        ghslot[0] = 0
+        if probe_spawn(ghost_ep, garg, 0, null_name(), ghslot) != 0:
+            ghost_spawn_fail += 1
+        elif probe_detach(ghslot) != 0:
+            ghost_detach_fail += 1
+        i += 1
+    # No join exists for a detached child: reconcile by bounded polling.
+    # Convergence proves every ghost exited (its last act is the dtor firing
+    # counted below), which makes the key teardown below race-free.
+    var exp_rt = Int64(ghosts * CHURN_CYCLES)
+    var dl = deadline_seconds(WAIT_SECONDS)
+    var settled = False
+    while not settled:
+        settled = (
+            dg[DG_ROUNDTRIP_OK] == exp_rt and dg[DG_ROUNDTRIP_BAD] == 0
+            and dg[DG_SET_FAIL] == 0
+            and dg[DG_DTOR_OBSERVED] == Int64(ghosts)
+        )
+        if past_deadline(dl):
+            break
+        if not settled:
+            _ = c_sched_yield()
+    print(
+        "S2-STRESS ghost ledger: detached=", ghosts,
+        " roundtrip_ok=", dg[DG_ROUNDTRIP_OK],
+        " dtor_observed=", dg[DG_DTOR_OBSERVED],
+        " anomalies=", dg[DG_ROUNDTRIP_BAD] + dg[DG_SET_FAIL],
+        " spawn_fail=", ghost_spawn_fail,
+        " detach_fail=", ghost_detach_fail,
+    )
+    if not settled or ghost_spawn_fail != 0 or ghost_detach_fail != 0:
+        failed += 1
+        print(
+            "S2-STRESS FAIL: ghost reconciliation TIMEOUT/anomaly",
+            " (see ghost ledger)",
+        )
+
+    # Key teardown: phases A-C drained every binding before their joins and
+    # the ghost poll above proves every detached child exited (POSIX: a
+    # destructor does not fire for values still bound at key destruction —
+    # the exact reconciliation already proves none remain).
     try:
         key.destroy()
     except e:
@@ -512,6 +681,7 @@ def main() raises:
             "S2-STRESS PASS: ",
             exp_rounds, " storm children across", WRITERS, " writers;",
             " ", exp_burst_threads, " barrier-burst threads;",
+            " ", ghosts, " detached ghost children;",
             " ledger reconciled EXACTLY; zero lost wakes; zero double-joins",
         )
         print("RESULT: s2-stress green")
