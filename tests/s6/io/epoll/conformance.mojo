@@ -512,6 +512,18 @@ def _run_scale_tier(mut p: EpollPoller, tier: Int) raises -> Bool:
     return passed
 
 
+def _teardown_tier(mut p: EpollPoller, fds: Int32Ptr, made: Int) raises -> Bool:
+    var ok = True
+    var j = 0
+    while j < made:
+        if p.unregister_raw(NativeIoHandle(fds[2 * j])) != 0:
+            ok = False
+        _ = _close(fds[2 * j])
+        _ = _close(fds[2 * j + 1])
+        j += 1
+    return ok
+
+
 def _platform_label() -> String:
     var tgt = CompilationTarget()
     if tgt.is_linux():
@@ -522,7 +534,7 @@ def _platform_label() -> String:
 
 
 def main() raises:
-
+    var failed = 0
 
     # epoll is LINUX-ONLY. On a non-Linux host this suite is an EXPLICIT
     # §38.6-style red-exclusion (never a silent skip) and still ends GREEN;
