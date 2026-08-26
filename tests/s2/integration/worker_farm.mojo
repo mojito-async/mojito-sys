@@ -35,11 +35,13 @@
 #     checked by main after join; main-side code uses the raising wrappers.
 #   - Null pointers come from a RUNTIME zero (`unsafe_from_address=0` literal
 #     is rejected); UnsafePointer is non-nullable, "unset" is the zero address.
-#   - The worker SETS its binding through the raw mjs_tls_set ABI spelling
-#     (rc-recording, raise-free — same proven shape as tests/s2/thread/
-#     tls_test.mojo) and RETRIEVES through the typed NativeTlsKey handle
-#     adopted from the shared key id: get() is non-raising, so the typed
-#     handle is exercised on every worker thread.
+#   - The worker SETS its binding through the public NativeTlsKey.set()
+#     using the same try/except-into-result-cells shape proven in
+#     tests/s2/conformance/tls/conformance.mojo tls_worker_entry: raises
+#     NEVER cross the C boundary — a failed set lands as set_rc != 0 and is
+#     checked by main after join. Both bind and retrieve now go through the
+#     ONE public typed handle (§41 criterion: downstream code without
+#     private-API spellings).
 #
 # Run via tests/s2/integration/run.sh (builds both dylibs first).
 from std.memory import stack_allocation
@@ -61,7 +63,6 @@ from mojito_sys.thread.thread import (
 from mojito_sys.thread.tls import (
     NativeTlsKey,
     TlsValuePtr,
-    mjs_tls_set,
 )
 
 comptime NUM_WORKERS = 4
@@ -110,7 +111,7 @@ def check(name: String, ok: Bool) -> Bool:
 struct WorkerArg:
     var key_id: UInt          # shared NativeTlsKey id (minted by main)
     var payload_addr: Int     # THIS worker's pointer cell (its "worker pointer")
-    var set_rc: Int32         # mjs_tls_set rc (0 = bound)
+    var set_rc: Int32         # typed key.set() result cell (0 = bound)
     var got_before: Int       # retrieved binding address BEFORE the switch
     var switch_rc: Int32      # ms_stack_alloc rc for the worker-local pair
     var got_after: Int        # retrieved binding address AFTER the switch
@@ -147,11 +148,17 @@ def switch_alt(ud: BytePtr) abi("C"):
 @export("s29_worker_entry")
 def worker_entry(ud: BytePtr) abi("C"):
     var wa = ud.bitcast[WorkerArg]()
-    # Bind: raw rc-recording ABI spelling (raise-free C entry).
-    wa[].set_rc = mjs_tls_set(wa[].key_id, ptr_at(wa[].payload_addr))
+    # Bind through the PUBLIC typed handle: try/except-into-result-cells
+    # (proven conformance pattern) keeps the C entry raise-free.
+    var k = NativeTlsKey(wa[].key_id)
+    wa[].set_rc = -1
+    try:
+        k.set(ptr_at(wa[].payload_addr))
+        wa[].set_rc = 0
+    except e:
+        _ = e  # recorded as set_rc != 0
     # Retrieve through the TYPED handle adopted from the shared key id —
     # the public downstream pattern (get() is non-raising).
-    var k = NativeTlsKey(wa[].key_id)
     wa[].got_before = addr_of(k.get())
     # Worker-local synthetic context switch on THIS OS thread.
     var slots = stack_allocation[2, BytePtr]()
