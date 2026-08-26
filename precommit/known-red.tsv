@@ -6,3 +6,4 @@
 # still logged. Remove the row as soon as the implementation turns the test
 # green — an unlisted failure blocks the commit.
 #
+# Rows are matched on the <test-name> printed by the suite (e.g. `bench`,
