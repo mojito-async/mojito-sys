@@ -7,3 +7,8 @@
 # green — an unlisted failure blocks the commit.
 #
 # Rows are matched on the <test-name> printed by the suite (e.g. `bench`,
+
+# TDD-red: s5-ctx-x86 x86-64 SysV backend lane (issue #72), implemented in
+# a later commit of this PR. The gate matches the aggregate `make test-s5`
+# run_check name (`s5-tests`); removed once the backend turns the lane green.
+s5-tests	https://github.com/mojito-async/mojito-sys/issues/72
