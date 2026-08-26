@@ -37,6 +37,10 @@
  *     wakes return to the caller, whose predicate loop re-enters
  *     wait_until and re-derives a fresh remainder. A non-positive
  *     remainder short-circuits to -ETIMEDOUT without entering the wait.
+ *     Darwin late-fire floor: deadlines are honored with positive-only
+ *     skew — up to ~10ms late under load, never early (empirical:
+ *     p50 ≈6ms overshoot, max ≈10ms under a 19-waiter broadcast storm);
+ *     scheduler owners must not assume µs precision.
  *
  * Linux-portable: no Mach/_np symbols are referenced unless the
  * __APPLE__ path is compiled; no -arch or platform flags needed.
