@@ -39,7 +39,7 @@ SELFTEST_BIN := $(BUILD)/selftest
 
 .DELETE_ON_ERROR:
 .PHONY: all selftest test bench test-s1 test-s2 test-s2-conformance \
-        test-s2-stress test-s2-integration clean
+        test-s2-stress test-s2-integration test-s2-pkg clean
 
 all: $(DYLIB) $(SELFTEST_BIN) $(DYLIB_SYS)
 
