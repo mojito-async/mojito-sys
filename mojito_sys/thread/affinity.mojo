@@ -70,16 +70,18 @@ struct CpuSet(ImplicitlyCopyable):
             w += 1
 
     # Set covering CPUs start..end-1 (end exclusive). Raises EINVAL when
-    # end < start or the range exceeds CPUSET_WORDS*64 bits — rejection,
-    # never silent truncation. An empty range (start == end) is ACCEPTED
-    # here and rejected at pin time (see set_current_thread_affinity), so
-    # computed sets fail at the point of use, not construction.
+    # start < 0, end < start, or the range exceeds CPUSET_WORDS*64 bits —
+    # rejection, never silent truncation (a negative start would otherwise
+    # floor-divide to a negative word index: an out-of-bounds write).
+    # An empty range (start == end) is ACCEPTED here and rejected at pin
+    # time (see set_current_thread_affinity), so computed sets fail at the
+    # point of use, not construction.
     # Blocking: no. Allocates: no. Thread-safe: yes. Reentrant: yes.
-    # Signal-safe: no guarantee. Ownership: value semantics.
-    # Platform notes: none. Stability: experimental.
+    # Signal-safe: no guarantee. Task-aware: no. Ownership: value
+    # semantics. Platform notes: none. Stability: experimental.
     @staticmethod
     def from_range(start: Int, end: Int) raises -> CpuSet:
-        if end < start or end > CPUSET_WORDS * 64:
+        if start < 0 or end < start or end > CPUSET_WORDS * 64:
             raise_errno(_EINVAL_RC)
         var cs = CpuSet()
         if end == start:
@@ -93,10 +95,12 @@ struct CpuSet(ImplicitlyCopyable):
 
     # Set from explicit mask words, low word first: from_mask(w0) covers
     # CPUs 0..63, from_mask(w0, w1) covers 0..127, ... Raises EINVAL past
-    # CPUSET_WORDS words.
+    # CPUSET_WORDS words. No other rejection exists: every UInt64 bit
+    # pattern is a legal mask by construction (unsigned words cannot be
+    # negative), mirroring from_range's total validation symmetrically.
     # Blocking: no. Allocates: no. Thread-safe: yes. Reentrant: yes.
-    # Signal-safe: no guarantee. Ownership: value semantics.
-    # Platform notes: none. Stability: experimental.
+    # Signal-safe: no guarantee. Task-aware: no. Ownership: value
+    # semantics. Platform notes: none. Stability: experimental.
     @staticmethod
     def from_mask(first: UInt64, *rest: UInt64) raises -> CpuSet:
         if 1 + len(rest) > CPUSET_WORDS:
@@ -112,8 +116,8 @@ struct CpuSet(ImplicitlyCopyable):
     # True iff `cpu` is selected. Negative or out-of-capacity indices are
     # simply not members.
     # Blocking: no. Allocates: no. Thread-safe: yes. Reentrant: yes.
-    # Signal-safe: no guarantee. Ownership: value semantics.
-    # Platform notes: none. Stability: experimental.
+    # Signal-safe: no guarantee. Task-aware: no. Ownership: value
+    # semantics. Platform notes: none. Stability: experimental.
     def contains(self, cpu: Int) -> Bool:
         if cpu < 0 or cpu >= CPUSET_WORDS * 64:
             return False
@@ -124,8 +128,8 @@ struct CpuSet(ImplicitlyCopyable):
 
     # True iff no CPU is selected (empty sets are refused at pin time).
     # Blocking: no. Allocates: no. Thread-safe: yes. Reentrant: yes.
-    # Signal-safe: no guarantee. Ownership: value semantics.
-    # Platform notes: none. Stability: experimental.
+    # Signal-safe: no guarantee. Task-aware: no. Ownership: value
+    # semantics. Platform notes: none. Stability: experimental.
     def is_empty(self) -> Bool:
         var w = 0
         while w < self.nwords:
@@ -145,7 +149,7 @@ struct CpuSet(ImplicitlyCopyable):
 # Allocates: one stack buffer for the mask (no heap traffic).
 # Thread-safe: yes (affects only the calling thread).
 # Reentrant: yes.
-# Signal-safe: no guarantee.
+# Signal-safe: no guarantee. Task-aware: no.
 # Ownership: borrows `set` for the duration of the call; retains nothing.
 # Platform notes: Linux sched_setaffinity(0, ...) on the calling thread;
 #   darwin thread_policy_set (mask contents advisory there). Spawn-time

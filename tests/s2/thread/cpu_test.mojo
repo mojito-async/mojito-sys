@@ -169,7 +169,19 @@ def main() raises:
     if not check("builder-capacity-guard", ok):
         failed += 1
 
-    print("RESULT: " + String(8 - failed) + "/8 PASSED")
+    # P1 regression: a negative start must raise EINVAL BEFORE any index
+    # math — floor-dividing -1 // 64 yields word -1 (out-of-bounds write /
+    # debug-build bounds abort).
+    ok = False
+    try:
+        _ = CpuSet.from_range(-1, 4)
+    except e:
+        ok = errno_is(e, "EINVAL")
+    if not check("builder-negative-start-guard", ok):
+        failed += 1
+
+    print("RESULT: " + String(9 - failed) + "/9 PASSED")
+
     if failed != 0:
         raise Error("s2-cpu-mojo conformance FAILED (issue #53)")
     print("RESULT: all green")
