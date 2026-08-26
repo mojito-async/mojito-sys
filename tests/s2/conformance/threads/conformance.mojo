@@ -25,8 +25,8 @@
 #     ids DISTINCT across 8 simultaneously-live threads and distinct from
 #     the spawner's id;
 #   8. shutdown-drain         — 16 detached children all observed exiting
-#     (done flags polled under a 10s deadline): detach-all drains with
-#     zero leaked live threads before process exit.
+#     (done flags polled under a 10s deadline). This is a completion-polling
+#     drain: it proves every child ran to exit, not OS-level handle reaping.
 #
 # Platform-tolerant skips are RECORDED, never silent: case 6 degrades to a
 # '<case>: SKIP (<reason>)' row when the host lacks pthread_getname_np
@@ -66,7 +66,10 @@ from mojito_sys.thread.thread import (
 )
 
 comptime CellsPtr = UnsafePointer[Int64, MutAnyOrigin]
-comptime NameBufBytes = 128
+# Poison/getname buffer spans ud+4 → bytes 32..63: offset 32 + NameBufBytes
+# = 64 exactly, the full tail of the STRIDE=8 (64-byte) cells block. Names
+# are ≤15 chars + NUL, so pthread_getname_np buflen stays safe.
+comptime NameBufBytes = 32
 
 # Per-thread userdata block layout (Int64 cells, one block per child):
 #   [0] done flag        [1] status to return   [2] sleep microseconds
