@@ -157,8 +157,17 @@ MS_SYM(ms_context_switch):
          * can both observe SUSPENDED and both enter the target. The
          * ldaxr/stlxrb exclusive pair makes arming RUNNING exclusive —
          * the loser of a race re-validates and traps on the winner's
-         * RUNNING/FINISHED — so resume-of-RUNNING traps UNCONDITIONALLY
-         * instead of corrupting (printed header guarantee). */
+         * RUNNING/FINISHED. That makes resume-of-RUNNING trap UNCONDITIONALLY
+         * for the single-resumer race (one thread re-resuming a context
+         * another thread holds RUNNING); but the symmetric cross-switch
+         * (T1 A->B in parallel with T2 B->A) is detected only BEST-EFFORT:
+         * the ldaxr/stlxrb exclusive pair arms exactly one owner, so at most
+         * one of T1/T2 wins the arm (memory-safe single-owner semantics, no
+         * corruption). The losing switcher may observe a clean EMPTY/
+         * SUSPENDED arm instead of the winner's RUNNING/FINISHED, so a #0x69
+         * trap is NOT guaranteed for that symmetric case — the single-owner
+         * guarantee (one winner, never two) is unconditional; the loud #0x69
+         * trap is not always raised. */
         /* Exclusive ops take no displacement: address the state slot
          * through a scratch (x15). The BETWEEN-pair window must contain
          * NO plain store to the SAME cache line as STATE: RETTO@176

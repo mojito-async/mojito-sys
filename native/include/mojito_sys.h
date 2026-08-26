@@ -591,7 +591,11 @@ int mjs_event_destroy(mjs_event **e);
  * mutable state remains in the library — so they may be created,
  * switched, and finished concurrently on different threads without
  * locking. Resuming a context another thread currently holds RUNNING
- * traps loudly rather than corrupting. NULL context/entry arguments
+ * traps loudly rather than corrupting in the single-resumer case; a
+ * symmetric cross-switch (T1 A->B parallel with T2 B->A) is detected
+ * best-effort — at most one owner wins the exclusive arm (memory-safe
+ * single-owner semantics, never two), but a #0x69 trap is not always
+ * raised on the loser. NULL context/entry arguments
  * are caller bugs where the signature cannot report them (void entry
  * points).
  *
@@ -644,9 +648,10 @@ int ms_context_init(
 void ms_context_capture(ms_context *ctx);
 
 /* Save the current state into `from` and resume `to`. Switching is
- * allocation-free (spec §20.1). Resuming a finished, destroyed, or
- * currently-RUNNING context traps loudly (#66 per-record state
- * machine). */
+ * allocation-free (spec §20.1). Resuming a finished or destroyed
+ * context traps loudly; resuming a currently-RUNNING one traps loudly in
+ * the single-resumer case but is detected best-effort only for a
+ * symmetric cross-switch (#66 per-record state machine). */
 void ms_context_switch(
     ms_context *from,
     ms_context *to
