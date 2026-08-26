@@ -1,4 +1,4 @@
-# Intentional TDD-red tests. Format: <test-name>	<tracking-issue-url>
+# Intentional TDD-red tests. Format: <test-name>\t<tracking-issue-url>
 #
 # precommit/gate.sh runs the full suite on every commit. A failing test that
 # is listed here is expected (TDD: red test first, implementation lands in a
@@ -6,4 +6,3 @@
 # still logged. Remove the row as soon as the implementation turns the test
 # green — an unlisted failure blocks the commit.
 #
-s2-cpu-mojo	https://github.com/mojito-async/mojito-sys/issues/53
