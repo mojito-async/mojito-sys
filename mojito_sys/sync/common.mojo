@@ -27,7 +27,7 @@ struct WaitStatus(ImplicitlyCopyable):
                   be false; always re-check and re-wait in a loop.
       timed_out — the deadline expired before any wake.
 
-    Blocking: n/a (pure value).
+    Blocking: no — pure value, never blocks (SYS-5).
     Allocation: none — one machine word (SYS-4).
     Task-aware: no — produced by OS-thread-blocking primitives (§14).
     """
