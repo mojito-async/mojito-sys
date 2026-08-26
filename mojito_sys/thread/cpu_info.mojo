@@ -59,7 +59,7 @@ def mjs_cpu_physical(out_slot: IntOut) abi("C") -> Int32:
 # Allocates: no.
 # Thread-safe: yes (pure query).
 # Reentrant: yes.
-# Signal-safe: no guarantee (sysconf is not async-signal-safe).
+# Signal-safe: no guarantee (sysconf is not async-signal-safe). Task-aware: no.
 # Ownership: value semantics; nothing retained.
 # Platform notes: advisory count — hotplug/cpuset may change it any time.
 # Stability: experimental.
@@ -81,6 +81,7 @@ def cpu_logical_count() raises -> Int:
 # Thread-safe: yes (pure query).
 # Reentrant: yes.
 # Signal-safe: no guarantee (underlying libc queries are not
+#   async-signal-safe). Task-aware: no.
 def cpu_physical_count() raises -> Optional[Int]:
     var cell = stack_allocation[1, Int32]()
     var rc = mjs_cpu_physical(cell)
