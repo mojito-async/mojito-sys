@@ -7,5 +7,3 @@
 # green — an unlisted failure blocks the commit.
 #
 # Rows are matched on the <test-name> printed by the suite (e.g. `bench`,
-s1-dynlib	https://github.com/mojito-async/mojito-sys/issues/46
-s1-tests	https://github.com/mojito-async/mojito-sys/issues/46

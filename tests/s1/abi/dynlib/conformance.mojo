@@ -40,7 +40,7 @@ def check(name: String, ok: Bool) -> Bool:
     return ok
 
 
-def run_checks() -> Int:
+def run_checks() raises -> Int:
     var failures = 0
 
     # D1 — mode constants carry their POSIX values (same on darwin/Linux
@@ -53,22 +53,22 @@ def run_checks() -> Int:
 
     # D2 — main-image round-trip: dlopen(NULL) opens non-null.
     var lib = main_library(RTLD_LAZY)
-    failures += Int(check("D2 main image opens", not lib.is_null()))
+    failures += Int(not check("D2 main image opens", not lib.is_null()))
 
     # D3 — known libc symbol resolves to a stable nonzero address.
     var a1 = lib.resolve("malloc")
     var a2 = lib.resolve("malloc")
-    failures += Int(check("D3 malloc resolves nonzero+stable", a1 != 0 and a1 == a2))
+    failures += Int(not check("D3 malloc resolves nonzero+stable", a1 != 0 and a1 == a2))
 
     # D4 — the loader surface itself is visible through the same path.
     var adl = lib.resolve("dlopen")
-    failures += Int(check("D4 dlopen self-resolves", adl != 0))
+    failures += Int(not check("D4 dlopen self-resolves", adl != 0))
 
     # D5 — refcounted re-open: two handles over one image both close clean.
     var h1 = main_library(RTLD_NOW)
     var h2 = main_library(RTLD_NOW)
     var ok5 = h1.dispose() == 0 and h2.dispose() == 0
-    failures += Int(check("D5 double open/close refcount", ok5))
+    failures += Int(not check("D5 double open/close refcount", ok5))
 
     # D6 — missing library raises a deterministic error.
     var ok6 = False
@@ -76,7 +76,7 @@ def run_checks() -> Int:
         _ = open_library("libmojito_no_such_46.dylib", RTLD_NOW)
     except e:
         ok6 = contains(String(e), "dlopen failed")
-    failures += Int(check("D6 missing library raises", ok6))
+    failures += Int(not check("D6 missing library raises", ok6))
 
     # D7 — missing symbol raises deterministically, naming the symbol.
     var lib2 = main_library(RTLD_LAZY)
@@ -87,7 +87,7 @@ def run_checks() -> Int:
         ok7 = contains(String(e), "dlsym failed") and contains(
             String(e), "mojito_definitely_absent_symbol_46"
         )
-    failures += Int(check("D7 missing symbol raises named", ok7))
+    failures += Int(not check("D7 missing symbol raises named", ok7))
 
     # D8 — close-once ownership: dispose commits exactly once; a repeat
     # dispose is a no-op returning 0.
@@ -95,7 +95,7 @@ def run_checks() -> Int:
     var rc1 = lib3.dispose()
     var was_disposed = lib3.is_disposed()
     var rc2 = lib3.dispose()
-    failures += Int(check("D8 close-once dispose", rc1 == 0 and was_disposed and rc2 == 0))
+    failures += Int(not check("D8 close-once dispose", rc1 == 0 and was_disposed and rc2 == 0))
 
     # D9 — resolve after dispose is a deterministic misuse error.
     var ok9 = False
@@ -103,19 +103,19 @@ def run_checks() -> Int:
         _ = lib3.resolve("malloc")
     except e:
         ok9 = contains(String(e), "disposed")
-    failures += Int(check("D9 resolve-after-dispose raises", ok9))
+    failures += Int(not check("D9 resolve-after-dispose raises", ok9))
 
     # D10 — move transfers ownership: the destination closes exactly once;
     # the moved-from source destructor stays silent.
     var src = main_library(RTLD_LAZY)
     var dst = src^
     var ok10 = dst.dispose() == 0 and dst.is_disposed()
-    failures += Int(check("D10 move transfers close-once ownership", ok10))
+    failures += Int(not check("D10 move transfers close-once ownership", ok10))
 
     return failures
 
 
-def main():
+def main() raises:
     var failures = run_checks()
     if failures == 0:
         print("RESULT: all green")
