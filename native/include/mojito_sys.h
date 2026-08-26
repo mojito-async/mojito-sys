@@ -651,7 +651,7 @@ void ms_context_destroy(ms_context *ctx);
 /* --- s5-stack --- */
 /*
  * S5.7 STACK GROWTH POLICY (issue #70, 5-expert panel ruling recorded in
- * docs §54.1): NativeContext stack reservations are FIXED — there is NO
+ * docs §55): NativeContext stack reservations are FIXED — there is NO
  * automatic software growth and NO grow-on-demand. The enclosing
  * reservation is created by its OWNER (mjs_stack_alloc is the usual
  * provider: it paints a PROT_NONE guard page at the low end and returns

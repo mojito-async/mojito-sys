@@ -68,8 +68,9 @@
  *          through an invalid return address (spec §22 L1173): the
  *          completion pass tail-calls ms_context_switch unconditionally
  *          with lr aimed here;
- *   #0x6b  16-misaligned sp at restore (S5.7): a resumed sp with bit 3 set
- *          (not 16-aligned, AAPCS64) traps BEFORE it can go live.
+ *   #0x6b  16-misaligned sp at restore (S5.7): a resumed sp whose low 4 bits
+ *          are nonzero (not 16-aligned — AAPCS64 requires sp ≡ 0 mod 16)
+ *          traps BEFORE it can go live.
  */
 
 #if defined(__APPLE__)
@@ -217,7 +218,8 @@ MS_SYM(ms_context_switch):
         ldp     x21, x22, [x1, #16]
         ldp     x19, x20, [x1, #0]
         ldr     x16, [x1, #MS_CTX_SP_OFF]
-        tbnz    x16, #3, 10f                  /* 16-misaligned sp: trap */
+        tst     x16, #15
+        b.ne    10f                             /* sp low 4 bits nonzero: trap */
         mov     sp, x16
         ldp     x29, x30, [x1, #80]             /* fp, lr restored last */
         ret                                     /* br x30 semantics */
@@ -246,7 +248,8 @@ MS_SYM(ms_context_switch):
         ldp     x21, x22, [x1, #16]
         ldp     x19, x20, [x1, #0]
         ldr     x16, [x1, #MS_CTX_SP_OFF]
-        tbnz    x16, #3, 10b                  /* 16-misaligned sp: trap #0x6b */
+        tst     x16, #15
+        b.ne    10b                             /* sp low 4 bits nonzero: trap #0x6b */
         mov     sp, x16
         ldp     x29, x30, [x1, #80]
         ret
