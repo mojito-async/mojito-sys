@@ -220,6 +220,30 @@ def live_double_destroy_raises() raises -> Bool:
         return contains(String(e), "EINVAL")
 
 
+# ---- 5b. EXPIRY PARITY racer: paces a signal against a near-expiry park ------
+# ud: [0]=pace event [1]=target event [2]=stop flag. Each pace release makes
+# the racer signal the target within microseconds while the spawner parks
+# ~3 ms: the signal lands pre-park, mid-park, or in the expiry/re-lock
+# window. Every park must complete .ok CONSUMING the token — never
+# .timed_out with credit left pending (the C layer re-checks e->signaled
+# before propagating -ETIMEDOUT; wake beats timeout).
+@export("mjs_s35_parity_racer_entry")
+def _parity_racer_entry(ud: CellsPtr) abi("C") -> Int64:
+    try:
+        while ud[2] == 0:
+            var cls = _wake_class(
+                _externs.probe_ev_wait_until(
+                    ud[0], _now_ns() + UInt64(10_000_000_000)
+                )
+            )
+            if cls != 0:
+                return -1
+            _ = _externs.probe_ev_signal(ud[1])
+    except:
+        return -1
+    return 0
+
+
 def main() raises:
     var failed = 0
 
@@ -389,9 +413,33 @@ def main() raises:
     # The primitive stays fully functional after the endurance run.
     var post_st = lwe.wait_until(MonotonicInstant.now() - duration_from_millis(1))
     var post_ok = post_st == WaitStatus.timed_out
-    lwe.destroy()
-    acke.destroy()
-    if not check("S3.5 5. lost-wakeup regression: 10k racing cycles, zero hangs", lost_wakeups_free and post_ok):
+    # 5b. EXPIRY PARITY: race paced signals against a ~3 ms park —
+    # every park completes .ok consuming the token (wake beats
+    # timeout; never .timed_out with credit left pending).
+    var ppe = NativeEvent.create()
+    var pw_args = stack_allocation[3, Int64]()
+    pw_args[0] = ppe.handle
+    pw_args[1] = lwe.handle
+    pw_args[2] = 0  # stop flag (stack_allocation is NOT zeroed)
+    var pracer = spawn_native_thread(
+        entry_pointer["mjs_s35_parity_racer_entry"](), pw_args, 0, no_name(),
+    )
+    var parity_ok = True
+    var j5 = 0
+    while j5 < 2000 and parity_ok:
+        _ = ppe.signal()
+        parity_ok = _wake_class(
+            _externs.probe_ev_wait_until(
+                lwe.handle, _now_ns() + UInt64(3_000_000)
+            )
+        ) == 0
+        j5 += 1
+    pw_args[2] = 1
+    _ = ppe.signal()  # final pace releases the racer so it can exit
+    parity_ok = parity_ok and pracer.join() == 0
+    ppe.destroy()
+    if not parity_ok:
+        _ = check("S3.5 5b. expiry parity: signal-racing-expiry completes .ok consuming the token", False)
         failed += 1
 
     # ---- 6. coalescing pins the consumed-vs-sticky choice ------------------------

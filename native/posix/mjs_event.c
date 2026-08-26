@@ -101,12 +101,17 @@ int mjs_event_wait_until(mjs_event *e, uint64_t deadline_ns) {
         return rc;
     while (e->signaled == 0) {
         rc = mjs_condvar_wait_until(e->cv, e->m, deadline_ns);
-        if (rc != 0) {
-            /* -ETIMEDOUT (status) or a real error: no token either
-             * way, propagate with the mutex released. */
+        if (rc != 0 && e->signaled == 0) {
+            /* -ETIMEDOUT (status) or a real error, with NO token
+             * visible at the re-check: propagate with the mutex
+             * released. */
             mjs_mutex_unlock(e->m);
             return rc;
         }
+        /* EXPIRY PARITY: if the deadline expired but a signal made the
+         * token visible before this re-check (wake beats timeout), fall
+         * through and consume it — wait_until returns 0, never
+         * -ETIMEDOUT with a pending token. */
     }
     e->signaled = 0; /* CONSUME the single token */
     return mjs_mutex_unlock(e->m);
