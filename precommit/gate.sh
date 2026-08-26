@@ -81,15 +81,22 @@ else
         run_check t1-t7      make test
         run_check t8-t14     ./tests/spike/run_t8_t14.sh
         run_check bench      make bench
-        run_check s1-tests    make test-s1
-        run_check s2-tests    make test-s2
-        run_check no-markers  sh -c "! git grep -n -E '^(<<<<<<< |>>>>>>> )' -- native mojito_sys tests benchmark"
+        run_check s1-tests         make test-s1
+        run_check s2-tests         make test-s2
+        run_check s2-conformance   make test-s2-conformance
+        run_check s2-stress        make test-s2-stress
+        run_check s2-integration   make test-s2-integration
+        run_check s2-pkg           make test-s2-pkg
     else
         say "== fast suite (selftest, T1-T7) — fast=1"
         run_check selftest   make selftest
         run_check t1-t7      make test
-        run_check s1-tests    make test-s1
-        run_check s2-tests    make test-s2
+        run_check s1-tests         make test-s1
+        run_check s2-tests         make test-s2
+        run_check s2-conformance   make test-s2-conformance
+        run_check s2-stress        make test-s2-stress
+        run_check s2-integration   make test-s2-integration
+        run_check s2-pkg           make test-s2-pkg
         run_check no-markers  sh -c "! git grep -n -E '^(<<<<<<< |>>>>>>> )' -- native mojito_sys tests benchmark"
     fi
 fi
