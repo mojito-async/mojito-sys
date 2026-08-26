@@ -4,17 +4,24 @@
  * The register-level half lives in ms_context_aarch64.S, a single macro
  * skeleton serving both Darwin Mach-O and Linux ELF (S5.2, issue #65).
  * This file owns everything that is portable C:
- *   - the frozen v2 save-area definition, pinned by _Static_asserts to
- *     the offsets the asm hardcodes (regs @0, fps @96, sp @160, 168 B);
+ *   - the frozen v2 save-area definition plus the v3 lifecycle tail
+ *     (#66), pinned by _Static_asserts to the offsets the asm hardcodes;
  *   - the sideband geometry getters;
  *   - argument validation for the block's only errno-style entry point
  *     (ms_context_init);
  *   - capture-as-self-switch;
- *   - destroy-as-poison (sp slot 0 => the switch traps loudly).
+ *   - destroy-as-poison (state DEAD + sp slot 0 => the switch traps
+ *     loudly);
+ *   - the per-context finish-hook registry (ms_context_set_finish_hook,
+ *     #66).
  *
- * The lifecycle still uses the spike's single-threaded return-to
- * bookkeeping (global resume table); replacing it with per-context state
- * is S5.3 (issue #66) and does NOT change this frozen ABI.
+ * S5.3 (#66): the lifecycle is SELF-CONTAINED per context record — a
+ * state machine (DEAD/EMPTY/RUNNING/SUSPENDED/FINISHED) plus its own
+ * return target live in each record; the spike's global return-to table
+ * and last-from/last-to globals are GONE. Unbounded live contexts, and
+ * distinct contexts are thread-independent (one thread at a time PER
+ * CONTEXT — caller serializes). This does NOT change the frozen ABI:
+ * every v2 offset and contract is preserved prefix-stable.
  */
 
 #include <mojito_sys.h>
@@ -24,16 +31,35 @@
 #include <stdint.h>
 #include <string.h>
 
+/* Per-context lifecycle states (#66) — MUST mirror the MS_STATE_*
+ * .set directives in ms_context_aarch64.S. */
+enum ms_ctx_state {
+    MS_CTX_DEAD = 0,      /* zeroed storage: destroyed or never armed */
+    MS_CTX_EMPTY = 1,     /* armed by init/capture, never resumed */
+    MS_CTX_RUNNING = 2,   /* currently executing on some OS thread */
+    MS_CTX_SUSPENDED = 3, /* suspended mid-life, resumable */
+    MS_CTX_FINISHED = 4   /* entry returned; permanent switch-out done */
+};
+
 /* Frozen v2 layout — must match the mojito_sys.h s5-ctx block comment and
- * the immediate offsets hardcoded in ms_context_aarch64.S. */
+ * the immediate offsets hardcoded in ms_context_aarch64.S — plus the v3
+ * lifecycle tail (#66), which appends AFTER the frozen 168 bytes so every
+ * v2 offset stays prefix-stable. */
 struct ms_context {
     uint64_t regs[12]; /* x19..x30: slot i => x(19+i); [10]=fp, [11]=lr */
     uint64_t fps[8];   /* low 64 bits of callee-saved v8..v15 (d8..d15) */
     uint64_t sp;
+    /* v3 lifecycle tail (#66) — owned by THIS record, no global table */
+    uint64_t state;    /* enum ms_ctx_state */
+    uint64_t ret_to;   /* most recent switcher (trampoline's exit target) */
+    uint64_t finish_cb;/* ms_context_finish_fn (NULL = none) */
+    uint64_t finish_ud;/* userdata handed to finish_cb */
 };
 
-_Static_assert(sizeof(struct ms_context) == 168,
-               "ms_context must be 12 regs + 8 fps + sp = 168 bytes (v2)");
+_Static_assert(sizeof(struct ms_context) ==
+                   168 + 4 * sizeof(uint64_t),
+               "ms_context must be v2's 168 bytes + 4-slot lifecycle tail "
+               "= 200 bytes (v3)");
 _Static_assert(_Alignof(struct ms_context) == 8,
                "ms_context must be 8-byte aligned");
 _Static_assert(offsetof(struct ms_context, regs) == 0,
@@ -42,6 +68,11 @@ _Static_assert(offsetof(struct ms_context, fps) == 96,
                "fps[] must be at +96: asm stp/ldp d8-d15 immediates");
 _Static_assert(offsetof(struct ms_context, sp) == 160,
                "sp slot must be at +160: asm immediate");
+_Static_assert(offsetof(struct ms_context, state) == 168 &&
+                   offsetof(struct ms_context, ret_to) == 176 &&
+                   offsetof(struct ms_context, finish_cb) == 184 &&
+                   offsetof(struct ms_context, finish_ud) == 192,
+               "lifecycle tail offsets must match ms_context_aarch64.S");
 
 size_t ms_context_size(void) { return sizeof(struct ms_context); }
 
@@ -77,14 +108,27 @@ int ms_context_init(ms_context *ctx, void *stack_low, size_t stack_size,
 void ms_context_capture(ms_context *ctx) {
     /* Self-switch saves the live state into ctx and immediately resumes
      * it: control returns right here with a resumable snapshot stored.
-     * A NULL ctx is a caller bug (header contract); the switch traps. */
+     * The self-switch path arms the record as SUSPENDED regardless of
+     * prior state, so capture on destroyed storage REVIVES it (header
+     * F4 contract). A NULL ctx is a caller bug (header contract); the
+     * switch traps. */
     ms_context_switch(ctx, ctx);
+}
+
+void ms_context_set_finish_hook(ms_context *ctx, ms_context_finish_fn hook,
+                                void *userdata) {
+    if (ctx == NULL)
+        return; /* NULL ctx is a caller bug (header block); ignored,
+                 * matching ms_context_destroy's NULL case. */
+    ctx->finish_cb = (uint64_t)hook;
+    ctx->finish_ud = (uint64_t)userdata;
 }
 
 void ms_context_destroy(ms_context *ctx) {
     if (ctx == NULL)
         return;
-    /* Poison the whole save area: the zeroed sp slot makes any later
-     * switch INTO this context trap loudly in the backend. */
+    /* Poison the whole record including the lifecycle tail: state DEAD
+     * makes any later switch INTO this context trap loudly in the
+     * backend (and zeroes any registered finish hook with it). */
     memset(ctx, 0, sizeof(*ctx));
 }

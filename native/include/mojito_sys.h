@@ -555,19 +555,29 @@ int mjs_event_destroy(mjs_event **e);
  * Synthetic entry: ms_context_init prepares ctx so its first resume
  * lands on an internal trampoline that calls entry(userdata) with a
  * 16-byte-aligned sp (AAPCS64 at function entry). userdata is passed
- * through UNMODIFIED. When entry returns, control switches permanently
- * back to the most recent switcher of ctx; resuming a finished or
- * destroyed context traps loudly (deliberate hard trap, not -errno).
+ * through UNMODIFIED. When entry returns, the trampoline's completion
+ * stage runs — the registered finish hook (see
+ * ms_context_set_finish_hook), then the record is marked FINISHED —
+ * and control switches PERMANENTLY back to the most recent switcher
+ * of ctx; resuming a finished or destroyed context traps loudly
+ * (deliberate hard trap, not -errno).
  *
- * Thread-safety: NONE until S5.3 (#66) — bookkeeping is process-global;
- * ALL ms_context operations in a process must occur on ONE OS thread;
- * serializing each context separately is NOT sufficient. NULL
- * context/entry arguments are caller bugs where the signature cannot
- * report them (void entry points).
+ * Lifecycle (#66): every context RECORD owns its own state machine —
+ * DEAD (zeroed storage) / EMPTY (armed by init or capture) / RUNNING
+ * (currently executing) / SUSPENDED (mid-life, resumable) / FINISHED
+ * (entry returned) — plus its own return target. There is NO global
+ * bookkeeping: any number of live contexts may exist simultaneously
+ * (the spike-era 64-context return-to-table limit is gone).
  *
- * Pre-#66 limitation: at most 64 distinct contexts may ever be resumed
- * per process (fixed return-to table, rows never reclaimed); exceeding
- * it traps loudly.
+ * Thread-safety (#66): PER-CONTEXT exclusivity. The caller serializes
+ * concurrent operations on the SAME context (one OS thread at a time
+ * per context); distinct contexts are thread-INDEPENDENT — no shared
+ * mutable state remains in the library — so they may be created,
+ * switched, and finished concurrently on different threads without
+ * locking. Resuming a context another thread currently holds RUNNING
+ * traps loudly rather than corrupting. NULL context/entry arguments
+ * are caller bugs where the signature cannot report them (void entry
+ * points).
  *
  * Blocking (SYS-5): all of these are non-blocking. Allocation (SYS-4):
  * none.
@@ -575,10 +585,15 @@ int mjs_event_destroy(mjs_event **e);
 
 typedef struct ms_context ms_context;
 typedef void (*ms_context_entry)(void *);
+/* Completion hook shape (additive, #66); see ms_context_set_finish_hook. */
+typedef void (*ms_context_finish_fn)(void *userdata);
 
 /* Sideband geometry of the caller-owned save area (see layout above).
  * Compile-time constants surfaced as functions so consumers can bind
- * them without knowing the backend. size == 168, alignment == 8. */
+ * them without knowing the backend. Since #66 the record carries a
+ * per-context lifecycle tail after the frozen v2 prefix: size == 200,
+ * alignment == 8 (v2 consumers that sized storage via this getter are
+ * unaffected; nothing reads or writes the tail beyond its own record). */
 size_t ms_context_size(void);
 size_t ms_context_alignment(void);
 
@@ -607,8 +622,9 @@ int ms_context_init(
 void ms_context_capture(ms_context *ctx);
 
 /* Save the current state into `from` and resume `to`. Switching is
- * allocation-free (spec §20.1). Resuming a finished or destroyed context
- * traps loudly. */
+ * allocation-free (spec §20.1). Resuming a finished, destroyed, or
+ * currently-RUNNING context traps loudly (#66 per-record state
+ * machine). */
 void ms_context_switch(
     ms_context *from,
     ms_context *to
@@ -622,6 +638,22 @@ void ms_context_switch(
  * Destroying a currently-running context from inside itself is a
  * caller bug. */
 void ms_context_destroy(ms_context *ctx);
+
+/* Register ctx's completion hook (additive, #66): hook(userdata) runs
+ * EXACTLY ONCE, on ctx's synthetic stack, after ctx's entry() returns
+ * and before the permanent switch-out to the most recent switcher.
+ * A context completes at most one lifetime, so a hook fires at most
+ * once per record; a hook registered after the context has already
+ * FINISHED never fires (the completion pass has already run), and
+ * destroy(ctx) discards any registered hook. hook == NULL clears.
+ * Non-blocking (SYS-5); no allocation (SYS-4); NULL ctx is a caller
+ * bug and is ignored (void entry point, same regime as
+ * ms_context_destroy). */
+void ms_context_set_finish_hook(
+    ms_context *ctx,
+    ms_context_finish_fn hook,
+    void *userdata
+);
 
 #ifdef __cplusplus
 }

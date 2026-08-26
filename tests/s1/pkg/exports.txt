@@ -56,3 +56,4 @@ ms_context_init
 ms_context_capture
 ms_context_switch
 ms_context_destroy
+ms_context_set_finish_hook
