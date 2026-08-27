@@ -19,9 +19,9 @@
 #                           claims are violations.
 #   s3-audit-exports        exports.txt <-> nm bidirectional EXACT over
 #                           ALL S3 symbols (mjs_mutex_/mjs_condvar_/
-#                           mjs_atomic_/mjs_event_): every listed name is
-#                           exported AND every exported S3 symbol is
-#                           listed.
+#                           mjs_atomic_/mjs_event_/mjs_sem_): every listed
+#                           name is exported AND every exported S3 symbol
+#                           is listed.
 #   s3-audit-header-frozen  native/include/mojito_sys.h is APPEND-ONLY
 #                           vs origin/main: no mjs_* declaration present
 #                           on main may be missing at HEAD (additions are
@@ -45,7 +45,7 @@ row() { # <name> <exit-status>
     fi
 }
 
-SYNC_MODULES="mojito_sys/sync/common.mojo mojito_sys/sync/mutex.mojo mojito_sys/sync/condvar.mojo mojito_sys/sync/event.mojo mojito_sys/sync/atomic_wait.mojo"
+SYNC_MODULES="mojito_sys/sync/common.mojo mojito_sys/sync/mutex.mojo mojito_sys/sync/condvar.mojo mojito_sys/sync/event.mojo mojito_sys/sync/atomic_wait.mojo mojito_sys/sync/semaphore.mojo"
 
 # ---- 1. SYS-5 trio audit ------------------------------------------------------
 # awk walks each file once, buffering lines; on file change (and at END)
@@ -130,9 +130,9 @@ if [ -f "$DYLIB" ] && command -v nm >/dev/null 2>&1; then
         echo "    | SKIP: no portable nm found (-gU and -g --defined-only both failed)"
     else
         $NM_LIST "$DYLIB" | awk 'NF >= 3 {print $3}' | sed 's/^_//' | sort >"$tmpdir/actual"
-        grep -E '^mjs_(mutex_|condvar_|atomic_|event_)' "$tmpdir/actual" >"$tmpdir/actual_s3"
+        grep -E '^mjs_(mutex_|condvar_|atomic_|event_|sem_)' "$tmpdir/actual" >"$tmpdir/actual_s3"
         sed -e 's/#.*$//' -e '/^[[:space:]]*$/d' tests/s1/pkg/exports.txt \
-            | sed 's/[[:space:]]//g' | grep -E '^mjs_(mutex_|condvar_|atomic_|event_)' | sort >"$tmpdir/expected_s3"
+            | sed 's/[[:space:]]//g' | grep -E '^mjs_(mutex_|condvar_|atomic_|event_|sem_)' | sort >"$tmpdir/expected_s3"
         missing_in_dylib=$(comm -23 "$tmpdir/expected_s3" "$tmpdir/actual_s3")
         unlisted_exports=$(comm -13 "$tmpdir/expected_s3" "$tmpdir/actual_s3")
         if [ -z "$missing_in_dylib" ] && [ -z "$unlisted_exports" ]; then
