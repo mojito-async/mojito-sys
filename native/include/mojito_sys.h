@@ -698,18 +698,21 @@ int mjs_sem_destroy(mjs_sem **s);
  * Blocking (SYS-5): all of these are non-blocking. Allocation (SYS-4):
  * none.
  */
-
 typedef struct ms_context ms_context;
 typedef void (*ms_context_entry)(void *);
 /* Completion hook shape (additive, #66); see ms_context_set_finish_hook. */
 typedef void (*ms_context_finish_fn)(void *userdata);
 
-/* Sideband geometry of the caller-owned save area (see layout above).
- * Compile-time constants surfaced as functions so consumers can bind
- * them without knowing the backend. Since #66 the record carries a
- * per-context lifecycle tail after the frozen v2 prefix: size == 200,
- * alignment == 8 (v2 consumers that sized storage via this getter are
- * unaffected; nothing reads or writes the tail beyond its own record). */
+/* Register ctx's completion hook (additive, #66). See the declaration
+ * near the end of this s5-ctx block for the full contract; this forward
+ * declaration keeps consumers compiling when they include the header
+ * before the block's tail. */
+void ms_context_set_finish_hook(
+    ms_context *ctx,
+    ms_context_finish_fn hook,
+    void *userdata
+);
+
 size_t ms_context_size(void);
 size_t ms_context_alignment(void);
 
@@ -1144,21 +1147,33 @@ int mjs_iouring_entries(mjs_uring *p, unsigned *out_sq, unsigned *out_cq);
 int mjs_iouring_close(mjs_uring **p);
 
 
-/* Register ctx's completion hook (additive, #66): hook(userdata) runs
- * EXACTLY ONCE, on ctx's synthetic stack, after ctx's entry() returns
- * and before the permanent switch-out to the most recent switcher.
- * A context completes at most one lifetime, so a hook fires at most
- * once per record; a hook registered after the context has already
- * FINISHED never fires (the completion pass has already run), and
- * destroy(ctx) discards any registered hook. hook == NULL clears.
- * Non-blocking (SYS-5); no allocation (SYS-4); NULL ctx is a caller
- * bug and is ignored (void entry point, same regime as
- * ms_context_destroy). */
-void ms_context_set_finish_hook(
-    ms_context *ctx,
-    ms_context_finish_fn hook,
-    void *userdata
-);
+/* --- s5-stack --- */
+/*
+ * S5.7 STACK GROWTH POLICY (issue #70, 5-expert panel ruling recorded in
+ * docs §55): NativeContext stack reservations are FIXED — there is NO
+ * automatic software growth and NO grow-on-demand. The enclosing
+ * reservation is created by its OWNER (mjs_stack_alloc is the usual
+ * provider: it paints a PROT_NONE guard page at the low end and returns
+ * guard_low), and growth is the top-down descent over the range the
+ * owner has COMMITTED (mjs_vm_commit / NativeStack.grow). Crossing the
+ * guard floor faults synchronously at the faulting store
+ * (SIGBUS/SIGSEGV) — the library never installs the guard, never
+ * mprotects caller storage, and never soft-grows (SYS-4, ADR-SYS-005).
+ *
+ * The library enforces what it can without an ABI change (the record
+ * stays 200 bytes; the v3 lifecycle tail is fully allocated):
+ *   - ms_context_init rejects stack_low/size combinations that wrap
+ *     (stack_top overflow, -EINVAL);
+ *   - the switch backend traps (brk #0x6b) on a restored sp that is
+ *     NOT 16-aligned (AAPCS64) BEFORE sp goes live — a poisoned or
+ *     corrupt record can never resume into a wild stack pointer;
+ *   - recorded bounds enforcement (sp inside the committed span) is
+ *     the OWNER's job at dispatch: read the saved sp slot (@160) and
+ *     reject to->sp < owner_floor || to->sp > top before switching.
+ * Unguarded static-buffer reservations remain accepted for tests and
+ * compatibility; overflow on them is documented caller error, never a
+ * library promise.
+ */
 
 #ifdef __cplusplus
 }
