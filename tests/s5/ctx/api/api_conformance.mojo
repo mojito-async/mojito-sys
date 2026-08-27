@@ -86,13 +86,13 @@ def main() raises:
     var ctxA = NativeContext.create(
         stA.guard_low,
         stA.top,
-        entry_pointer["ctx_entry_done"](),
+        entry_pointer["user_entry_done"](),
         CTX_PTR(unsafe_from_address=Int(0)),
     )
     var ctxB = NativeContext.create(
         stB.guard_low,
         stB.top,
-        entry_pointer["ctx_entry_done"](),
+        entry_pointer["user_entry_done"](),
         CTX_PTR(unsafe_from_address=Int(0)),
     )
     var create_ok = (ctxA.state() == ST_ARMED) and (ctxB.state() == ST_ARMED)
