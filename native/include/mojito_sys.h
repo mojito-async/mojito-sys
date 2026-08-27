@@ -544,30 +544,57 @@ int mjs_event_destroy(mjs_event **e);
  * numeric-frame corruption without d8-d15 saves): Backend-pinned via
  * _Static_asserts in ms_context.c — INTERNAL to the library,
  * informational here, not a consumer promise; kept for the S5.2 ELF
- * port. Register-level backends address these slots directly:
- *   168 bytes total:
+ * port. Register-level backends address these slots directly. What is
+ * pinned here is the frozen v2 PREFIX; the #66 lifecycle tail appends a
+ * 4-slot v3 TAIL after it (168-byte prefix + 4 x uint64_t = 200 bytes
+ * total; see the Lifecycle paragraph below):
+ *   v2 prefix — 168 bytes:
  *     regs[12] @   0.. 95  x19..x28, fp(x29) @80, lr(x30) @88
  *     fps[8]   @  96..159  low 64 bits of v8..v15 (d8..d15)
  *     sp       @ 160       saved stack pointer
- * A switch saves/restores exactly these plus sp; nothing else. Backends
- * NEVER write x18 (platform-reserved on Apple platforms).
+ * x86-64 restore-time trap #0x6b: besides the shared misuse classes, the
+ * x86-64 SysV backend ALSO traps (int3, %eax marker #0x6b) if a context's
+ * saved sp slot is not 16-byte aligned when a switch is about to restore
+ * it — SysV requires rsp ≡ 0 (mod 16) at callee entry, so a misaligned
+ * slot is corruption caught BEFORE the bad stack is committed (mirrors
+ * the make-time #0x64 class; the AArch64 backend's restore path has no
+ * alignment trap because its initial-sp invariant is enforced at make).
  *
+ * BACKEND SUPPORT STATUS (x86-64 SysV, read loudly): NOT
+ * NativeContext-supported yet. Native support requires FULL 128-bit
+ * preservation of the entire SysV callee-saved SIMD set — xmm14/xmm15 are
+ * still omitted because the frozen fps bank holds only 8 low-64 slots
+ * (SysV diverges from AAPCS64 here) — plus a passing in-repo conformance
+ * suite (spec §38.6). Until then the x86-64 SysV backend is a
+ * cross-assembled structural mirror only (assembles cleanly on this host;
+ * behavioral rows are RED-EXCLUDED UNSUPPORTED-PLATFORM until a
+ * Linux/x86_64 runner exists — tests/s5/x86).
  * Synthetic entry: ms_context_init prepares ctx so its first resume
  * lands on an internal trampoline that calls entry(userdata) with a
  * 16-byte-aligned sp (AAPCS64 at function entry). userdata is passed
- * through UNMODIFIED. When entry returns, control switches permanently
- * back to the most recent switcher of ctx; resuming a finished or
- * destroyed context traps loudly (deliberate hard trap, not -errno).
+ * through UNMODIFIED. When entry returns, the trampoline's completion
+ * stage runs — the registered finish hook (see
+ * ms_context_set_finish_hook), then the record is marked FINISHED —
+ * and control switches PERMANENTLY back to the most recent switcher
+ * of ctx; resuming a finished or destroyed context traps loudly
+ * (deliberate hard trap, not -errno).
  *
- * Thread-safety: NONE until S5.3 (#66) — bookkeeping is process-global;
- * ALL ms_context operations in a process must occur on ONE OS thread;
- * serializing each context separately is NOT sufficient. NULL
- * context/entry arguments are caller bugs where the signature cannot
- * report them (void entry points).
+ * Lifecycle (#66): every context RECORD owns its own state machine —
+ * DEAD (zeroed storage) / EMPTY (armed by init or capture) / RUNNING
+ * (currently executing) / SUSPENDED (mid-life, resumable) / FINISHED
+ * (entry returned) — plus its own return target. There is NO global
+ * bookkeeping: any number of live contexts may exist simultaneously
+ * (the spike-era 64-context return-to-table limit is gone).
  *
- * Pre-#66 limitation: at most 64 distinct contexts may ever be resumed
- * per process (fixed return-to table, rows never reclaimed); exceeding
- * it traps loudly.
+ * Thread-safety (#66): PER-CONTEXT exclusivity. The caller serializes
+ * concurrent operations on the SAME context (one OS thread at a time
+ * per context); distinct contexts are thread-INDEPENDENT — no shared
+ * mutable state remains in the library — so they may be created,
+ * switched, and finished concurrently on different threads without
+ * locking. Resuming a context another thread currently holds RUNNING
+ * traps loudly rather than corrupting. NULL context/entry arguments
+ * are caller bugs where the signature cannot report them (void entry
+ * points).
  *
  * Blocking (SYS-5): all of these are non-blocking. Allocation (SYS-4):
  * none.
@@ -575,10 +602,15 @@ int mjs_event_destroy(mjs_event **e);
 
 typedef struct ms_context ms_context;
 typedef void (*ms_context_entry)(void *);
+/* Completion hook shape (additive, #66); see ms_context_set_finish_hook. */
+typedef void (*ms_context_finish_fn)(void *userdata);
 
 /* Sideband geometry of the caller-owned save area (see layout above).
  * Compile-time constants surfaced as functions so consumers can bind
- * them without knowing the backend. size == 168, alignment == 8. */
+ * them without knowing the backend. Since #66 the record carries a
+ * per-context lifecycle tail after the frozen v2 prefix: size == 200,
+ * alignment == 8 (v2 consumers that sized storage via this getter are
+ * unaffected; nothing reads or writes the tail beyond its own record). */
 size_t ms_context_size(void);
 size_t ms_context_alignment(void);
 
@@ -603,12 +635,16 @@ int ms_context_init(
 /* Save the CURRENT execution state into ctx: a later
  * ms_context_switch(to = ctx) resumes just after this call. Capturing a
  * context that is already live (initialized/captured but not finished)
- * overwrites its saved state. */
+ * overwrites its saved state. Capture also REVIVES a FINISHED record:
+ * the self-switch re-arm is unconditional, so after capture(ctx) a
+ * completed context reads SUSPENDED again and resumes normally from the
+ * freshly saved snapshot (#66 lifecycle). */
 void ms_context_capture(ms_context *ctx);
 
 /* Save the current state into `from` and resume `to`. Switching is
- * allocation-free (spec §20.1). Resuming a finished or destroyed context
- * traps loudly. */
+ * allocation-free (spec §20.1). Resuming a finished, destroyed, or
+ * currently-RUNNING context traps loudly (#66 per-record state
+ * machine). */
 void ms_context_switch(
     ms_context *from,
     ms_context *to
@@ -1008,6 +1044,22 @@ int mjs_iouring_entries(mjs_uring *p, unsigned *out_sq, unsigned *out_cq);
  * consumed. NULL or NULLed *p is -EINVAL. */
 int mjs_iouring_close(mjs_uring **p);
 
+
+/* Register ctx's completion hook (additive, #66): hook(userdata) runs
+ * EXACTLY ONCE, on ctx's synthetic stack, after ctx's entry() returns
+ * and before the permanent switch-out to the most recent switcher.
+ * A context completes at most one lifetime, so a hook fires at most
+ * once per record; a hook registered after the context has already
+ * FINISHED never fires (the completion pass has already run), and
+ * destroy(ctx) discards any registered hook. hook == NULL clears.
+ * Non-blocking (SYS-5); no allocation (SYS-4); NULL ctx is a caller
+ * bug and is ignored (void entry point, same regime as
+ * ms_context_destroy). */
+void ms_context_set_finish_hook(
+    ms_context *ctx,
+    ms_context_finish_fn hook,
+    void *userdata
+);
 
 #ifdef __cplusplus
 }
