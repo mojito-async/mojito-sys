@@ -1,0 +1,33 @@
+# mojito-sys S6.7 benchmark regression baselines (issue #79, spec §38.13).
+#
+# Format: <metric_id>\t<direction>\t<baseline>\t<tolerance>
+#   direction: ge = higher-better (value >= baseline*(1-tol))
+#              le = lower-better  (value <= baseline*(1+tol))
+#   tolerance: fraction in (0,1); the 4th column defaults to 0.5 when absent.
+#
+# Calibrated from observed variance on the M5/ARM64 dev host running the
+# kqueue backend (darwin); as required by §38.13 the tolerance is derived
+# from observed per-benchmark variance (minimal here: the measurements are
+# batched and floor-bounded), then widened generously to absorb b2
+# toolchain/build noise without masking order-of-magnitude regressions.
+# Lines beginning with '#' are comments.
+
+# --- poller (benchmark/io/poller_bench.mojo) ---
+poller.create_ops_per_sec	ge	2000000	0.45
+poller.register_ops_per_sec	ge	890000	0.45
+poller.empty_wait_ns	le	12000	0.45
+poller.one_ready_wait_ns	le	205	0.70
+poller.storm_events_per_sec	ge	1300000000	0.45
+poller.token_decode_ops_per_sec	ge	3700000000	0.45
+poller.reg_1024_ops_per_sec	ge	2400000	0.45
+poller.wait_1024_latency_ns	le	205	0.70
+poller.reg_10240_ops_per_sec	ge	2200000	0.45
+poller.wait_10240_latency_ns	le	205	0.70
+poller.wake_latency_ns	le	82000	0.50
+
+# --- socket loopback (benchmark/io/socket_loopback_bench.mojo) ---
+socket.connect_setup_latency_ns	le	28000	0.50
+socket.pingpong_latency_ns	le	8500	0.45
+socket.thrpt_4k_mib_per_sec	ge	500	0.45
+socket.thrpt_64k_mib_per_sec	ge	9800	0.45
+socket.idle_pairs	ge	256	0.50

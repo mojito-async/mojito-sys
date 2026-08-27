@@ -39,7 +39,7 @@ SELFTEST_BIN := $(BUILD)/selftest
 
 .DELETE_ON_ERROR:
 .PHONY: all selftest test bench test-s1 test-s2 test-s2-conformance \
-        test-s2-stress test-s2-integration test-s2-pkg test-s3 test-s5 clean
+        test-s2-stress test-s2-integration test-s2-pkg test-s3 test-s5 bench-io clean
 
 all: $(DYLIB) $(SELFTEST_BIN) $(DYLIB_SYS)
 
@@ -81,6 +81,8 @@ test: $(DYLIB)
 
 bench: $(DYLIB)
 	$(MOJO) run -I $(SPIKE) -Xlinker $(DYLIB) benchmark/spike/bench_switch.mojo
+bench-io: $(DYLIB_SYS)
+	MOJO=$(MOJO) ./benchmark/io/run.sh
 
 test-s1: $(DYLIB_SYS)
 	MOJO=$(MOJO) ./tests/s1/run.sh

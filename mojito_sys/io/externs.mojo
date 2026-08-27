@@ -363,6 +363,9 @@ def probe_epoll_wake(p: PollerPtr) -> Int32:
 def probe_epoll_close(p: PollerSlot) -> Int32:
     return mjs_epoll_close(p)
 
+def probe_poller_close(p: PollerSlot) -> Int32:
+    return mjs_poller_close(p)
+
 
 # ---- s6-ioring bindings (issue #78) ------------------------------------------
 #
