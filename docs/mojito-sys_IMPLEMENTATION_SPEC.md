@@ -2687,6 +2687,156 @@ The project should track the current Mojo release documentation continuously bec
 ```
 
 `mojito-sys` should remain intentionally boring at the semantic level. Its value is that the mechanisms are **correct, fast, portable, audited, benchmarked, and independent of unstable Mojo runtime internals**.
+---
+
+# 54. Context debug/unwind + platform notes
+
+This section addresses spec §21 ("unwind/debug metadata where practical") and
+§43's "debug/unwind documentation" deliverable for the **NativeContext**
+backend (ms_context v2 + the #66 self-contained lifecycle; issues #64/#65/#66).
+It is authored against the shipped AArch64 backend (native/posix/
+ms_context_aarch64.S + ms_context.c) and is deliberately conservative: it
+documents what the code actually does today, and flags every place where the
+answer is "deferred" or "practically absent" so downstream debug/tooling
+expectations are not set higher than reality.
+
+## 54.1 Debugging synthetic stacks — the unwinding boundary
+
+A context runs on a **synthetic stack**: the stack bytes are caller-provided
+(mjs_stack_alloc / a raw mmap region), and execution reaches them not through
+a normal call but through a register-level switch (`ms_context_switch`)
+that replaces `sp`, `x29`, `x30` and the callee-saved GPR/SIMD set.
+
+The register backend is hand-written assembly and emits **no DWARF FDEs**
+and no `.eh_frame` contribution for the synthetic trampoline. There is no C
+frame to describe, and the backend deliberately avoids compiler-generated
+unwind metadata (spec §21: "no .eh_frame for hand-written asm"). Two concrete
+consequences:
+
+- **Unwinders stop at the switch boundary.** In `lldb` and `gdb`, a `bt`
+  backtrace taken while running on a synthetic stack unwinds the *caller*
+  frames out to the most recent `ms_context_switch` frame and then stops; the
+  synthetic frames themselves (the trampoline and the context's `entry`
+  frames) have no FDEs and are reported as an unknown/unwindable region.
+  This is **by design**, not a regression: the debugger cannot reconstruct
+  those frames, so it stops rather than guessing.
+- **Frame-pointer tracing helps only to the boundary.** The backend saves and
+  restores `x29` (fp) and `x30` (lr) for every context and zeros `fp` in the
+  freshly-made record, so a frame-pointer walk is well formed *up to* the
+  switch point. It still cannot step *across* the boundary onto a synthetic
+  stack without FDEs. When a synthetic frame faults, the effective `fp` chain
+  terminates at the switch, which is the signal that you have unwound to the
+  scheduler boundary.
+
+Tooling guidance: to inspect what is actually running when a context misbehaves,
+use the **sentinel / lifecycle / docs probes** (tests/s5/ctx) as a repro harness
+and set breakpoints on `ms_context_switch`, `mjs_ctx_trampoline`, and the trap
+guard labels below. Examine `x0`/`x1` (from/to) at the switch to see which
+record the scheduler handed control to, and read the per-record lifecycle tail
+(state @+168, ret_to @+176) from the record storage directly — these encode the
+transition the debugger's stack walk cannot see.
+
+## 54.2 Lifecycle traps and how they surface
+
+The backend traps loudly on genuine misuse (it never corrupts silently). On
+AArch64 the traps are `brk` immediates, which arrive at the debugger/reporting
+layer as **SIGTRAP** on both Darwin and Linux. The `brk` immediate identifies
+the exact site:
+
+| brk | condition                                    |
+|-----|-----------------------------------------------|
+| brk #0x64 | stack_top not 16-byte aligned at make (normally rejected earlier as -EINVAL by ms_context_init) |
+| brk #0x66 | resume of a FINISHED context (lifecycle tail) |
+| brk #0x68 | resume of DEAD storage (destroyed / never initialized / poisoned sp) |
+| brk #0x69 | re-resume of a RUNNING context (e.g. from another OS thread) |
+| brk #0x6a | trampoline fall-through guard — an invalid return address would fall through (§22 L1173); unreachable by construction |
+
+Under `lldb`, a SIGTRAP stopped thread at one of these `brk`s is the intended,
+loud diagnostic: the log shows the switch that faulted, and `register read`
+plus the state slot reveal the record's lifecycle state at the moment of the
+trap. Because the traps fire on *genuine* misuse only, a client that sees
+SIGTRAP here has a scheduler/lifecycle bug in its own calling code, not a
+backend fault — the conformance suite proves the ordinary paths never assert.
+
+## 54.3 State-machine transitions (authoritative table)
+
+The record carries its own per-context lifecycle tail (state @+168,
+ret_to @+176, finish_cb/finish_ud @+184/@+192). States mirror the *as
+documented* semantics:
+
+| state   | meaning                                               |
+|---------|-------------------------------------------------------|
+| DEAD    | zeroed / never-armed storage (0)                      |
+| EMPTY   | armed by init or capture; never run (1)               |
+| RUNNING | currently executing on some OS thread (2)             |
+| SUSPENDED | mid-life, resumable (3)                             |
+| FINISHED | entry returned; completion pass ran (4)              |
+
+Transitions enforced by the backend:
+
+```
+init                      -> EMPTY
+resume(EMPTY)             -> RUNNING
+switch-away (RUNNING)     -> SUSPENDED
+resume(SUSPENDED)         -> RUNNING
+entry returns             -> FINISHED   (permanent; re-resume => brk #0x66)
+resume(FINISHED)          -> brk #0x66
+resume(DEAD)              -> brk #0x68
+resume(RUNNING, other thr)-> brk #0x69
+capture (self-switch)     -> SUSPENDED  (re-arms, even for DEAD/FINISHED; REVIVE)
+misaligned stack_top      -> -EINVAL from ms_context_init; else trap #0x64
+trampoline completion     -> switch-out to ret_to; FINISHED never demoted
+trampoline fall-through   -> brk #0x6a (unreachable)
+```
+
+Note the **capture REVIVE** row: because the self-switch re-arm is
+unconditional, `capture()` on a destroyed or FINISHED record reads as
+SUSPENDED again and resumes from the freshly saved snapshot (header F4/F5
+contract). This is what the docs probe's revive row asserts.
+
+## 54.4 Platform support matrix
+
+| platform                | backend                          | status |
+|-------------------------|----------------------------------|--------|
+| AArch64 Darwin (Mach-O) | ms_context_aarch64.S `__APPLE__` | **supported** — conformance + lifecycle suites green at -O0 and -O2 on the host used for the S5 lanes |
+| AArch64 Linux (ELF)     | ms_context_aarch64.S `__ELF__`   | backend assembles/cross-assembles cleanly; behavioral rows are **RED-EXCLUDED per spec §38.6** until an arm64 Linux runner exists; not yet advertised as supported |
+| x86-64 System V         | none yet                          | **pending — issue #72** |
+| x86-64 Windows          | none yet                          | future / not scheduled |
+
+The AArch64 backend is exercised by the S5 conformance, sentinel, lifecycle,
+and docs suites. Every entry point starts with `bti c` (satisfies §21 BTI when
+enforced; a hint-space NOP otherwise). The backend never writes `x18`
+(platform-reserved on Apple), satisfying the §21 account-for item.
+
+Two §21 items are **deferred and explicitly documented**, not silent gaps:
+
+- **PAC/arm64e.** The backend is built with stock arm64 codegen: return
+  addresses are unsigned and `pacibsp`/`autiasp` are absent. Under arm64e/PAC
+  enforcement a restored, unsigned `lr` would fault on `ret`; making the
+  trampoline PAC-correct also requires every downstream frame (Mojo AOT) built
+  with matching PAC. Deferred — recorded at the top of ms_context_aarch64.S.
+- **Red zone.** The switch shim and trampoline neither use nor depend on a red
+  zone; the switch frame is exactly the register save described in the s5-ctx
+  header block (x19-x28, fp/lr, d8-d15, sp). No red-zone assumption is made.
+
+## 54.5 Guard-page signal semantics
+
+The stack backends from spec §16 place a `PROT_NONE` guard below the usable
+region so a downward underflow faults loudly. On **macOS** that underflow is
+delivered as **SIGBUS** rather than SIGSEGV (SPIKE observation 9): client code
+that maps either signal to "stack overflow" must accept both. On Linux the same
+underflow is SIGSEGV. The conformance/lifecycle probes rely on this to prove a
+synthetic stack never silently scribbles below its region.
+
+## 54.6 Stack growth policy and alignment
+
+Synthetic stacks are **non-moving, fixed-size** reservations (spec §6 SYS-6);
+the growth/commit policy is tracked separately (issue **#70**) and is not
+repeated here. The alignment requirement enforced by the backend is: the
+initial `sp` (stack_low + stack_size) must be 16-byte aligned (AAPCS64), i.e.
+stack_size must be a nonzero multiple of 16 and stack_low 16-byte aligned —
+violations are rejected with -EINVAL by `ms_context_init` (or trap #0x64 at
+make). This is asserted by the docs probe's misalignment row.
 
 # 55. S5.7 stack-growth policy — decision record (issue #70)
 
