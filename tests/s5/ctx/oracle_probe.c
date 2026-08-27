@@ -28,7 +28,10 @@
 #include <unistd.h>
 
 #define USABLE (64 * 1024)
-#define NSLOTS 21 /* 168 bytes / 8 */
+/* Save-area slots sized for BOTH oracle targets: prod (v3, 200 bytes
+ * since #66) and spike (v2, 168 bytes) — the spike library touches only
+ * its own 168-byte prefix. */
+#define NSLOTS 25
 
 static int failures;
 
