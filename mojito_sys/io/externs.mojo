@@ -269,6 +269,100 @@ def probe_poller_wake(p: PollerPtr) -> Int32:
     return mjs_poller_wake(p)
 
 
+# ---- s6-epoll bindings (issue #76) ------------------------------------------
+#
+# Same LEAF discipline as the s6-socket / s6-poller bindings above: raw
+# @extern declarations + non-raising probe_* shims ONLY. The LENGTHY
+# mojito_sys.io.platform.epoll decodes/raises after each call returns.
+# The EpollPoller reuses this leaf's PollerPtr/TimeoutSlot/WaitCountSlot
+# aliases and the mjs_poll_event layout (same mojito_sys.h struct).
+#
+# SCALAR BOUNDARY NOTES (byval-poison class, b2): interests/cap cross as
+# Int32; token is a plain UInt64 scalar (proven by s6-poller); out-slots
+# are MutAnyOrigin pointers pinning post-call loads.
+
+@extern("mjs_epoll_create")
+def mjs_epoll_create(out_slot: PollerSlot) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_epoll_register")
+def mjs_epoll_register(
+    p: PollerPtr, fd: Int32, interests: Int32, token: UInt64
+) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_epoll_modify")
+def mjs_epoll_modify(
+    p: PollerPtr, fd: Int32, interests: Int32, token: UInt64
+) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_epoll_unregister")
+def mjs_epoll_unregister(p: PollerPtr, fd: Int32) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_epoll_wait")
+def mjs_epoll_wait(
+    p: PollerPtr,
+    events: ByteBuf,
+    cap: Int32,
+    timeout_ns: TimeoutSlot,
+    out_n: WaitCountSlot,
+) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_epoll_wake")
+def mjs_epoll_wake(p: PollerPtr) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_epoll_close")
+def mjs_epoll_close(p: PollerSlot) abi("C") -> Int32:
+    ...
+
+
+def probe_epoll_create(out_slot: PollerSlot) -> Int32:
+    return mjs_epoll_create(out_slot)
+
+
+def probe_epoll_register(
+    p: PollerPtr, fd: Int32, interests: Int32, token: UInt64
+) -> Int32:
+    return mjs_epoll_register(p, fd, interests, token)
+
+
+def probe_epoll_modify(
+    p: PollerPtr, fd: Int32, interests: Int32, token: UInt64
+) -> Int32:
+    return mjs_epoll_modify(p, fd, interests, token)
+
+
+def probe_epoll_unregister(p: PollerPtr, fd: Int32) -> Int32:
+    return mjs_epoll_unregister(p, fd)
+
+
+def probe_epoll_wait(
+    p: PollerPtr,
+    events: ByteBuf,
+    cap: Int32,
+    timeout_ns: TimeoutSlot,
+    out_n: WaitCountSlot,
+) -> Int32:
+    return mjs_epoll_wait(p, events, cap, timeout_ns, out_n)
+
+
+def probe_epoll_wake(p: PollerPtr) -> Int32:
+    return mjs_epoll_wake(p)
+
+
+def probe_epoll_close(p: PollerSlot) -> Int32:
+    return mjs_epoll_close(p)
+
 def probe_poller_close(p: PollerSlot) -> Int32:
     return mjs_poller_close(p)
 

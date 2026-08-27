@@ -703,6 +703,14 @@ typedef void (*ms_context_entry)(void *);
 /* Completion hook shape (additive, #66); see ms_context_set_finish_hook. */
 typedef void (*ms_context_finish_fn)(void *userdata);
 
+/* Sideband geometry of the caller-owned save area (see layout above).
+ * Compile-time constants surfaced as functions so consumers can bind
+ * them without knowing the backend. Since #66 the record carries a
+ * per-context lifecycle tail after the frozen v2 prefix: size == 200,
+ * alignment == 8 (v2 consumers that sized storage via this getter are
+ * unaffected; nothing reads or writes the tail beyond its own record). */
+
+
 /* Register ctx's completion hook (additive, #66). See the declaration
  * near the end of this s5-ctx block for the full contract; this forward
  * declaration keeps consumers compiling when they include the header
@@ -1033,6 +1041,122 @@ int mjs_poller_wake(mjs_poller *p);
  * any later use (including a second destroy) is a deterministic
  * -EINVAL. Registered DESCRIPTORS are NOT closed. On failure the
  * handle is NOT consumed. NULL or NULLed *p is -EINVAL. */
+int mjs_poller_close(mjs_poller **p);
+
+/* --- s6-epoll --- */
+/*
+ * S6.4 epoll lifecycle (issue #76, spec §27.1/§28/§31/§38.7).
+ * Same return-value contract as the s6-poller block: 0 == success;
+ * negative == -errno; out-params UNTOUCHED on failure.
+ *
+ * BACKEND GUARD: epoll is LINUX-ONLY. Hosts without epoll (darwin, BSD,
+ * Windows) return EXACTLY -ENOSYS from every entry point
+ * (detect-and-exclude, mirroring the s6-poller kqueue contract) so the
+ * packaged dylib builds everywhere; the Mojo EpollPoller raises a decoded
+ * unsupported-platform error.
+ *
+ * Interests and events ship in one neutral bitmask:
+ *   MJS_POLL_READABLE / MJS_POLL_WRITABLE are REGISTERABLE interests;
+ *   MJS_POLL_EOF / MJS_POLL_ERROR are EVENT-ONLY flags, never accepted
+ *   as interests (-EINVAL when passed to register/modify).
+ *
+ * Trigger doctrine (spec §29 kept below the platform-neutral wrapper;
+ * §38.7 epoll-specific): this backend exposes LEVEL-triggered semantics
+ * by default — a ready fd is reported on every wait until the caller
+ * drains it. EPOLLET (edge) and EPOLLONESHOT are deliberately NOT
+ * exposed through the frozen ABI (documented exclusions; a reactor that
+ * needs edge selects it inside mojito-async, not here).
+ *
+ * Duplicate registration / modify: re-registering a live descriptor is an
+ * UPSERT via EPOLL_CTL_MOD — the LAST register/modify wins for BOTH
+ * interests and token. unregister of a not-registered descriptor
+ * succeeds (0); only real kernel errors (-errno) fail, so unregister/
+ * reuse races degrade to no-ops, never errors.
+ *
+ * Token: completely opaque identity (spec §31); preserved EXACTLY through
+ * every delivered event (64-bit value travels verbatim in
+ * epoll_event.data.u64).
+ *
+ * Wake: mjs_epoll_wake writes one 64-bit value on the internal eventfd
+ * (create pre-registers it for EPOLLIN). A wake makes at most ONE blocked
+ * wait return promptly; a wake with NO waiter STICKS so exactly one later
+ * wait returns promptly. N wakes with no waiter still release exactly ONE
+ * wait (the drained counter condenses to a single release). wake NEVER
+ * blocks (SYS-5); only wait parks its calling OS thread, bounded by
+ * timeout_ns.
+ *
+ * wait status mapping:
+ *   0        — success; *out_n carries 0..cap events (0 == timeout);
+ *              wake deliveries NEVER occupy an out slot but DO end the
+ *              wait early (possibly with *out_n == 0);
+ *   -EINTR   — interrupted before any event: raw -EINTR, caller retries
+ *               (§38.11 interrupt/retry doctrine);
+ *   other    — genuine error, negative -errno verbatim.
+ * Events beyond cap are DROPPED (callers loop). cap == 0 is -EINVAL.
+ *
+ * EOF/error delivery (§38.7 epoll-specific): EPOLLRDHUP or EPOLLHUP sets
+ * MJS_POLL_EOF; EPOLLERR sets MJS_POLL_ERROR; readiness bits OR in when
+ * present.
+ *
+ * Handle lifetime: create yields an owned opaque handle in *out; close
+ * CONSUMES it (**p NULLed on success). Any use of a consumed or NULL
+ * handle is a deterministic -EINVAL. The poller is NON-OWNING: closing
+ * it never closes registered descriptors (spec §25 borrow rule). Closing
+ * a REGISTERED descriptor silently retires its epoll entry (Linux drops
+ * it on close); no event fires, later waits report nothing.
+ *
+ * Blocking (SYS-5): ONLY mjs_epoll_wait may block (bounded by timeout_ns
+ * when non-NULL); register/modify/unregister/wake/close never block.
+ * Allocation (SYS-4): one fixed-size handle at create; NONE afterwards
+ * (the epoll_event batch lives on this file's stack).
+ * Task-aware: no — OS-thread granularity per spec §14.
+ */
+/* Opaque epoll poller handle (SYS-3). */
+typedef struct mjs_epoller mjs_epoller;
+
+/* Create a readiness poller (epoll-backed; internal eventfd wake source
+ * pre-registered). On success returns 0 and stores the handle in *out;
+ * NULL out-slot is -EFAULT with *out untouched. Without an epoll backend
+ * returns exactly -ENOSYS with *out untouched. */
+int mjs_epoll_create(mjs_epoller **out);
+
+/* Register `fd` for `interests` with opaque `token`. Re-registration of a
+ * live fd UPSERTS (last interests+token win); event-only flag bits in
+ * `interests` are -EINVAL. Non-blocking (SYS-5). */
+int mjs_epoll_register(mjs_epoller *p, int fd, uint32_t interests,
+                       uint64_t token);
+
+/* Modify an existing registration atomically-from-the-caller's-view:
+ * same upsert contract as register; filters dropped from `interests` are
+ * removed. */
+int mjs_epoll_modify(mjs_epoller *p, int fd, uint32_t interests,
+                     uint64_t token);
+
+/* Remove the registration for `fd`. Not-registered descriptors succeed
+ * (0); only real kernel errors (-errno) fail. Non-blocking (SYS-5). */
+int mjs_epoll_unregister(mjs_epoller *p, int fd);
+
+/* Wait for readiness on ANY registered descriptor into `events` (up to
+ * cap entries; cap == 0 is -EINVAL). timeout_ns: NULL = block until an
+ * event/wake; *timeout_ns == 0 = non-blocking poll; otherwise relative
+ * nanoseconds. Timeout expiry is SUCCESS with *out_n == 0. Returns
+ * -EINTR raw for retry; out_n untouched on failure. Blocking (SYS-5):
+ * parks the calling OS thread per the timeout contract ONLY. */
+int mjs_epoll_wait(mjs_epoller *p, mjs_poll_event *events, unsigned cap,
+                   const uint64_t *timeout_ns, unsigned *out_n);
+
+/* Make at most ONE blocked wait return promptly with zero events. A wake
+ * with no waiter sticks for exactly one later wait. Coalescing: N wakes
+ * while nobody waits still release exactly ONE wait. Never blocks
+ * (SYS-5). Allocation: none. */
+int mjs_epoll_wake(mjs_epoller *p);
+
+/* Destroy the poller and free its handle: *p is NULLed on success, so
+ * any later use (including a second destroy) is a deterministic
+ * -EINVAL. Registered DESCRIPTORS are NOT closed. On failure the handle
+ * is NOT consumed. NULL or NULLed *p is -EINVAL. */
+int mjs_epoll_close(mjs_epoller **p);
+
 /* --- s6-ioring --- */
 /*
  * S6.6 EXPERIMENTAL io_uring readiness backend (issue #78, spec §28/§30/
@@ -1146,6 +1270,22 @@ int mjs_iouring_entries(mjs_uring *p, unsigned *out_sq, unsigned *out_cq);
  * consumed. NULL or NULLed *p is -EINVAL. */
 int mjs_iouring_close(mjs_uring **p);
 
+
+/* Register ctx's completion hook (additive, #66): hook(userdata) runs
+ * EXACTLY ONCE, on ctx's synthetic stack, after ctx's entry() returns
+ * and before the permanent switch-out to the most recent switcher.
+ * A context completes at most one lifetime, so a hook fires at most
+ * once per record; a hook registered after the context has already
+ * FINISHED never fires (the completion pass has already run), and
+ * destroy(ctx) discards any registered hook. hook == NULL clears.
+ * Non-blocking (SYS-5); no allocation (SYS-4); NULL ctx is a caller
+ * bug and is ignored (void entry point, same regime as
+ * ms_context_destroy). */
+void ms_context_set_finish_hook(
+    ms_context *ctx,
+    ms_context_finish_fn hook,
+    void *userdata
+);
 
 /* --- s5-stack --- */
 /*

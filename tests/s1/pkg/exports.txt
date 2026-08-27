@@ -76,6 +76,13 @@ mjs_poller_unregister
 mjs_poller_wait
 mjs_poller_wake
 mjs_poller_close
+mjs_epoll_create
+mjs_epoll_register
+mjs_epoll_modify
+mjs_epoll_unregister
+mjs_epoll_wait
+mjs_epoll_wake
+mjs_epoll_close
 # --- s6-ioring (issue #78): experimental io_uring readiness backend ---
 mjs_iouring_probe
 mjs_iouring_available
