@@ -264,3 +264,76 @@ def probe_ev_signal(e: EventHandle) -> Int32:
 
 def probe_ev_destroy(slot: EventSlot) -> Int32:
     return mjs_event_destroy(slot)
+
+
+# ---- S3.7: mjs_sem_* bindings (issue #106) ----------------------------------
+#
+# Same leaf-module discipline as the blocks above. mjs_sem_init takes an
+# initial permit count (non-negative; < 0 is -EINVAL) plus an out-slot;
+# mjs_sem_wait_until takes an ABSOLUTE monotonic nanosecond deadline (the
+# mjs_clock_now domain) and returns 0 / -ETIMEDOUT / -errno — the wrapper
+# decodes the -ETIMEDOUT STATUS into WaitStatus.timed_out. mjs_sem_try_wait
+# returns 0 when a permit was taken, -EBUSY (status) when empty, otherwise
+# -errno. Permit-accounting semantics live in the C ABI block (counting
+# semaphore, non-negative count; see the s3-sem header comment).
+comptime SemHandle = Int64
+
+# mjs_sem_init / mjs_sem_destroy take mjs_sem** slots.
+comptime SemSlot = UnsafePointer[Int64, MutAnyOrigin]
+
+# Single-level mjs_sem* argument of wait/wait_until/try_wait/post.
+comptime SemPtr = UnsafePointer[Int64, MutAnyOrigin]
+
+
+@extern("mjs_sem_init")
+def mjs_sem_init(initial: Int32, out_slot: SemSlot) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_sem_post")
+def mjs_sem_post(s: SemPtr) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_sem_wait")
+def mjs_sem_wait(s: SemPtr) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_sem_wait_until")
+def mjs_sem_wait_until(s: SemPtr, deadline_ns: UInt64) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_sem_try_wait")
+def mjs_sem_try_wait(s: SemPtr) abi("C") -> Int32:
+    ...
+
+
+@extern("mjs_sem_destroy")
+def mjs_sem_destroy(slot: SemSlot) abi("C") -> Int32:
+    ...
+
+
+def probe_sem_init(initial: Int32, out_slot: SemSlot) -> Int32:
+    return mjs_sem_init(initial, out_slot)
+
+
+def probe_sem_post(s: SemHandle) -> Int32:
+    return mjs_sem_post(SemPtr(unsafe_from_address=Int(s)))
+
+
+def probe_sem_wait(s: SemHandle) -> Int32:
+    return mjs_sem_wait(SemPtr(unsafe_from_address=Int(s)))
+
+
+def probe_sem_wait_until(s: SemHandle, dl: UInt64) -> Int32:
+    return mjs_sem_wait_until(SemPtr(unsafe_from_address=Int(s)), dl)
+
+
+def probe_sem_try_wait(s: SemHandle) -> Int32:
+    return mjs_sem_try_wait(SemPtr(unsafe_from_address=Int(s)))
+
+
+def probe_sem_destroy(slot: SemSlot) -> Int32:
+    return mjs_sem_destroy(slot)
