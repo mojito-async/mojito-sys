@@ -249,9 +249,80 @@ else
     failures=$((failures + 1))
 fi
 
+# ---- issue #71 additions (debug/unwind + platform-notes docs lane) -------
 echo ""
-echo "S5 ctx issue-#66 matrix"
-echo "$lrows" | sed 's/^/  /'
+echo "== s5_ctx_docs rows (issue #71)"
+drows=""
+# Documentation lane: the DOC is the deliverable; the fixture (docs/run.sh
+# -> doc_probe.c) asserts the documented claims compile and hold against the
+# packaged dylib — spec §54 marker check (docs present), lifecycle traps via
+# SIGTRAP on misuse (brk #0x66/#0x68/#0x69 in fork children), the documented
+# state machine (incl. capture REVIVE), and loud -EINVAL misalignment
+# rejection — at BOTH -O0 and -O2.
+out=$(sh "$SCRIPT_DIR/docs/run.sh" 2>&1)
+st=$?
+printf '%s\n' "$out" | sed 's/^/   | /'
+if [ $st -eq 0 ] && printf '%s' "$out" | grep -q "RESULT: all green"; then
+    drows="$drows docs O0 PASS
+ docs O2 PASS
+"
+else
+    drows="$drows docs FAIL
+"
+    failures=$((failures + 1))
+fi
+
+echo ""
+echo "S5 ctx docs matrix (issue #71)"
+echo "$drows" | sed 's/^/  /'
+echo "== s5_ctx_stack rows (issue #70)"
+srows=""
+# Stack-growth policy (#70): contained growth on an mjs_stack_alloc
+# reservation, hard guard floor, canary, stack_top wrap rejection,
+# frozen-surface anchors, and the loud 16-misaligned-sp restore trap
+# (full 4-bit zero per AAPCS64, not just bit 3) — at BOTH -O0 and -O2.
+out=$(sh "$SCRIPT_DIR/stack/run.sh" 2>&1)
+st=$?
+printf '%s\n' "$out" | sed 's/^/   | /'
+if [ $st -eq 0 ] && printf '%s' "$out" | grep -q "RESULT: all green"; then
+    srows="$srows stack O0 PASS
+ stack O2 PASS
+"
+else
+    srows="$srows stack FAIL
+"
+    failures=$((failures + 1))
+fi
+
+echo ""
+echo "S5 ctx issue-#70 stack matrix"
+echo "$srows" | sed 's/^/  /'
+
+# ---- issue #68 additions -------------------------------------------------
+echo ""
+echo "== s5_ctx_conformance rows (issue #68)"
+crows=""
+# Permanent T1..T14 conformance suite: C equivalents of the S0 spike's
+# semantics (spec §6.5 / §38.6), at BOTH -O0 and -O2 plus the non-vacuous
+# T14 runtime-independence symbol audit. See
+# tests/s5/ctx/conformance/run.sh.
+out=$(sh "$SCRIPT_DIR/conformance/run.sh" 2>&1)
+st=$?
+printf '%s\n' "$out" | sed 's/^/   | /'
+if [ $st -eq 0 ] && printf '%s' "$out" | grep -q "RESULT: all green"; then
+    crows="$crows conformance O0 PASS
+ conformance O2 PASS
+ conformance T14 PASS
+"
+else
+    crows="$crows conformance FAIL
+"
+    failures=$((failures + 1))
+fi
+
+echo ""
+echo "S5 ctx issue-#68 matrix"
+echo "$crows" | sed 's/^/  /'
 
 echo ""
 echo "S5 ctx issue-#65 matrix"

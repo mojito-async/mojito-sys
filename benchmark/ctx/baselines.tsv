@@ -1,0 +1,21 @@
+# mojito-sys S5.6 — same-host ctx switch bench baselines (issue #69, spec §38.13)
+#
+# Format: metric<TAB>baseline<TAB>predicate
+#   Predicate semantics (see gate.sh case statement):
+#     `gt N` — FAIL if fresh > N (an upper bound; use for latency, which
+#              must not grow past N),
+#     `lt N` — FAIL if fresh < N (a lower bound; use for throughput, which
+#              must not drop below N).
+#
+# Baselines measured 2026-08-26 on this host:
+#   Darwin/arm64 (Apple M5), clang, packaged libmojito_sys.dylib.
+# Measured: switch_latency_ns ~ 6 (min-of-N); round_trips/sec ~ 78.3M.
+#
+# TOLERANCE CALIBRATION (b2-flake): the b2 JIT benchmark has ~±50% run-to-run
+# variance on this host (AOT-compiled min-of-N still shows compiler-motion
+# noise). Thresholds are wide: latency fails only above ~5x measured (30 ns),
+# throughput only below ~2.5% of measured (2M rps). Tighten once stable.
+
+host:	Darwin/arm64/25.5.0
+switch_latency_ns	6	gt 30
+round_trips_per_sec	78302762	lt 2000000
