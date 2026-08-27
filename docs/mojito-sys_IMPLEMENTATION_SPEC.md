@@ -2583,6 +2583,52 @@ platform TLS APIs
 **Decision:** S0 precedes broad infrastructure implementation.  
 **Reason:** external stack switching is the critical dependency.
 
+## ADR-SYS-009 — Readiness ships first; completion is a flagged experimental variant
+
+**Decision:** the polling abstraction exposes readiness and completion as two
+distinct, visible models (SYS-7). Readiness (spec §27.1) is the shipped
+compatibility surface: kqueue today (S6.3), epoll next (issue #76) behind the
+same `ReadinessPoller` shape. Completion (spec §27.2) is NOT folded into a
+readiness-only abstraction; it lives behind an experimental capability flag
+and lands only when its own semantics are sound. The proposed §27.2
+completion interface shape is validated as a runnable spike in
+`spike/completion/` (issue #77):
+
+```mojo
+trait CompletionPoller:
+    def submit(...) raises -> SubmissionToken
+    def cancel(...) raises
+    def wait_completions(...) raises -> Int
+    def wake(...) raises
+```
+
+with a non-blocking batch acquire added (`get_events`, the completion
+analogue of a readiness non-blocking poll). **Context:** epoll/kqueue report
+*when* a registered handle is ready and the caller performs the I/O;
+io_uring (issue #78) and IOCP deliver the *result of the I/O the caller
+already submitted*. Forcing either into the other's shape sacrifices
+correctness or performance (spec §27.2, §28, §30). The spike keeps the two
+models visibly separate, as SYS-7 requires, and documents that the concrete
+backends must each carry porting/feature-detection (io_uring kernel-version
+and cancellation gating per §28; IOCP per §30). **Consequences:**
+
+- Both `ReadinessPoller` and `CompletionPoller` trait surfaces remain public
+  and platform-neutral; backends implement the variant matching their
+  platform (spec §27).
+- Completion is reachable only through an explicit capability gate; it is
+  `EXPERIMENTAL` until io_uring operation coverage, cancellation, and
+  benchmarks demonstrate benefit (spec §28).
+- The completion ring and its per-token cancellation are encapsulated behind
+  §27.2; the spike's Mojo mock ring (scalar-cursor {submit,fetch} state) is an
+  interface-shape prototype, not a production ring.
+- **Non-goals:** no runtime selection of one model at the `mojito-sys` layer
+  (that is a `mojito-async`/reactor concern); no attempt at a single unified
+  `poll` covering both; no native io_uring/IOCP implementation in this spike.
+
+**Reason:** platform models differ materially (ADR-SYS-007); making the
+completion model visible and flag-gated lets `mojito-sys` stay correct on
+each OS while keeping the readiness path stable for early downstream users.
+
 ---
 
 # 50. Open questions
