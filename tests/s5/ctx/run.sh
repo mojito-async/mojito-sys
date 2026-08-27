@@ -249,9 +249,28 @@ else
     failures=$((failures + 1))
 fi
 
+echo "== s5_ctx_stack rows (issue #70)"
+srows=""
+# Stack-growth policy (#70): contained growth on an mjs_stack_alloc
+# reservation, hard guard floor, canary, stack_top wrap rejection,
+# frozen-surface anchors, and the loud 16-misaligned-sp restore trap
+# (full 4-bit zero per AAPCS64, not just bit 3) — at BOTH -O0 and -O2.
+out=$(sh "$SCRIPT_DIR/stack/run.sh" 2>&1)
+st=$?
+printf '%s\n' "$out" | sed 's/^/   | /'
+if [ $st -eq 0 ] && printf '%s' "$out" | grep -q "RESULT: all green"; then
+    srows="$srows stack O0 PASS
+ stack O2 PASS
+"
+else
+    srows="$srows stack FAIL
+"
+    failures=$((failures + 1))
+fi
+
 echo ""
-echo "S5 ctx issue-#66 matrix"
-echo "$lrows" | sed 's/^/  /'
+echo "S5 ctx issue-#70 stack matrix"
+echo "$srows" | sed 's/^/  /'
 
 echo ""
 echo "S5 ctx issue-#65 matrix"
