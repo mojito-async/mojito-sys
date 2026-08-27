@@ -26,3 +26,8 @@ tests/s3/*/.build/
 tests/s3/*/*/.build/
 tests/s5/*/.build/
 tests/s5/*/*/.build/
+tests/s6/*/.build/
+tests/s6/*/*/.build/
+benchmark/*/.build/
+benchmark/*/*.log
+spike/completion/.build/
