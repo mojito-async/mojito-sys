@@ -87,3 +87,10 @@ mjs_iouring_wait
 mjs_iouring_wake
 mjs_iouring_entries
 mjs_iouring_close
+# --- s3-sem (issue #106): counting semaphore ---
+mjs_sem_init
+mjs_sem_post
+mjs_sem_wait
+mjs_sem_wait_until
+mjs_sem_try_wait
+mjs_sem_destroy

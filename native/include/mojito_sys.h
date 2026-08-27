@@ -523,6 +523,105 @@ int mjs_event_signal(mjs_event *e);
 int mjs_event_destroy(mjs_event **e);
 
 
+/* --- s3-sem --- */
+/*
+ * S3.7 native counting semaphore (issue #106, spec §14/§17). Same
+ * return-value contract as above: 0 == success; negative == -errno;
+ * out-params UNTOUCHED on failure.
+ *
+ * PERMIT-ACCOUNTING SEMANTICS (NORMATIVE — spec §14 names permit
+ * accounting among the sync primitives but leaves breadth open; this
+ * ABI pins them): NativeSemaphore is a COUNTING semaphore holding a
+ * NON-NEGATIVE permit count.
+ *   - mjs_sem_post releases ONE permit: increments the count and wakes
+ *     AT MOST ONE parked waiter. With nobody waiting the permit stays
+ *     resident for a later wait, and permits ACCUMULATE — N posts with
+ *     no waiter leave N permits, so exactly N later waits complete
+ *     without blocking (a counting semaphore, NOT NativeEvent's
+ *     coalescing signal).
+ *   - mjs_sem_wait acquires ONE permit: it blocks while the count is
+ *     zero, then decrements it. Each permit is consumed by EXACTLY ONE
+ *     wait; permits are conserved across posts and waits.
+ *   - mjs_sem_wait_until is the bounded form: absolute monotonic
+ *     deadline in ns (same domain as mjs_clock_now; platform clock
+ *     mapping lives in the composed mjs_condvar — Linux condattr
+ *     CLOCK_MONOTONIC, macOS relative-NP remainder). EXPIRY PARITY:
+ *     a waiter that observes -ETIMEDOUT re-checks the permit count
+ *     before returning; a permit visible at that re-check is CONSUMED
+ *     and 0 returned — wake beats timeout, exactly like
+ *     mjs_event_wait_until and mjs_atomic_wait_on_u32.
+ *   - mjs_sem_try_wait acquires WITHOUT blocking: 0 once a permit was
+ *     taken, -EBUSY (a STATUS like try_lock's) when the count is zero,
+ *     another negative on error.
+ *   - The count NEVER goes negative: an acquisition that would take it
+ *     below zero instead blocks (wait/wait_until) or returns -EBUSY
+ *     (try_wait). Fairness is NOT promised: a fresh arrival may acquire
+ *     a permit ahead of an already-woken waiter that has not yet
+ *     reacquired the internal mutex.
+ *
+ * Handle lifetime: identical to the s3-mutex / s3-condvar / s3-event
+ * model — mjs_sem_init yields an owned opaque handle in *out;
+ * mjs_sem_destroy CONSUMES it (*s NULLed on success); any use of a
+ * consumed or NULL handle is a deterministic -EINVAL. Destroying a
+ * semaphore while threads still wait on it is a caller bug (undefined);
+ * the caller must join its waiters first.
+ *
+ * IMPLEMENTATION COMPOSITION: this layer composes the portable s3.1 +
+ * s3.2 primitives (one internal mjs_mutex, one internal mjs_condvar
+ * pinned per the s3-condvar clock domain, one int count), exactly like
+ * the s3-event and the AtomicWait-macOS-fallback precedent.
+ *
+ * Blocking (SYS-5): wait/wait_until block the calling OS thread until a
+ *   permit is available or the deadline expires; post wakes but never
+ *   waits; try_wait never blocks (returns -EBUSY on an empty
+ *   semaphore); init/destroy block only insofar as malloc and the
+ *   composed pthread primitives do.
+ * Allocation (SYS-4): one fixed-size handle at init; NONE afterwards.
+ * Task-aware: no — OS-thread granularity per spec §14.
+ */
+
+/* Opaque native counting-semaphore handle (SYS-3). */
+typedef struct mjs_sem mjs_sem;
+
+/* Create a semaphore with `initial` permits (>= 0). A count can never
+ * be negative, so `initial` < 0 is -EINVAL. On success returns 0 and
+ * stores the handle in *out; NULL out-slot is -EFAULT with *out
+ * untouched. */
+int mjs_sem_init(int initial, mjs_sem **out);
+
+/* Release ONE permit: increments the count and wakes AT MOST ONE
+ * waiter. Permits accumulate (counting semantics). Non-blocking
+ * (SYS-5); NULL handle -EINVAL. */
+int mjs_sem_post(mjs_sem *s);
+
+/* Acquire ONE permit, blocking (SYS-5) while the count is zero, then
+ * decrementing it. NULL handle is -EINVAL. */
+int mjs_sem_wait(mjs_sem *s);
+
+/* As wait, bounded by an ABSOLUTE monotonic deadline in ns (same domain
+ * as mjs_clock_now). Returns 0 once a permit was consumed, -ETIMEDOUT
+ * once the deadline passes (a STATUS like try_lock's -EBUSY), another
+ * negative on error. EXPIRY PARITY: a permit visible at the post-expiry
+ * re-check is CONSUMED and 0 returned — never -ETIMEDOUT with a permit
+ * left pending. A deadline already in the past returns -ETIMEDOUT
+ * without blocking unless a permit is already available (.ok then).
+ * NULL handle is -EINVAL. */
+int mjs_sem_wait_until(mjs_sem *s, uint64_t deadline_ns);
+
+/* Acquire ONE permit WITHOUT blocking. Returns 0 once a permit was
+ * taken, -EBUSY (a STATUS, not a failure) when the count is zero,
+ * another negative on error. Non-blocking (SYS-5); NULL handle -EINVAL.
+ * A permit is always taken whenever the count is positive, so this
+ * never blocks and never moves the count below zero. */
+int mjs_sem_try_wait(mjs_sem *s);
+
+/* Destroy the semaphore and free its handle: *s is NULLed on success,
+ * so any later use (including a second destroy) is a deterministic
+ * -EINVAL. On failure the handle is NOT consumed. NULL or NULLed *s is
+ * -EINVAL. */
+int mjs_sem_destroy(mjs_sem **s);
+
+
 /* --- s5-ctx --- */
 /*
  * S5.1 native contexts (issue #64, spec §20.2): stackful cooperative
@@ -552,9 +651,23 @@ int mjs_event_destroy(mjs_event **e);
  *     regs[12] @   0.. 95  x19..x28, fp(x29) @80, lr(x30) @88
  *     fps[8]   @  96..159  low 64 bits of v8..v15 (d8..d15)
  *     sp       @ 160       saved stack pointer
- * A switch saves/restores exactly these plus sp; nothing else. Backends
- * NEVER write x18 (platform-reserved on Apple platforms).
+ * x86-64 restore-time trap #0x6b: besides the shared misuse classes, the
+ * x86-64 SysV backend ALSO traps (int3, %eax marker #0x6b) if a context's
+ * saved sp slot is not 16-byte aligned when a switch is about to restore
+ * it — SysV requires rsp ≡ 0 (mod 16) at callee entry, so a misaligned
+ * slot is corruption caught BEFORE the bad stack is committed (mirrors
+ * the make-time #0x64 class; the AArch64 backend's restore path has no
+ * alignment trap because its initial-sp invariant is enforced at make).
  *
+ * BACKEND SUPPORT STATUS (x86-64 SysV, read loudly): NOT
+ * NativeContext-supported yet. Native support requires FULL 128-bit
+ * preservation of the entire SysV callee-saved SIMD set — xmm14/xmm15 are
+ * still omitted because the frozen fps bank holds only 8 low-64 slots
+ * (SysV diverges from AAPCS64 here) — plus a passing in-repo conformance
+ * suite (spec §38.6). Until then the x86-64 SysV backend is a
+ * cross-assembled structural mirror only (assembles cleanly on this host;
+ * behavioral rows are RED-EXCLUDED UNSUPPORTED-PLATFORM until a
+ * Linux/x86_64 runner exists — tests/s5/x86).
  * Synthetic entry: ms_context_init prepares ctx so its first resume
  * lands on an internal trampoline that calls entry(userdata) with a
  * 16-byte-aligned sp (AAPCS64 at function entry). userdata is passed
@@ -585,18 +698,21 @@ int mjs_event_destroy(mjs_event **e);
  * Blocking (SYS-5): all of these are non-blocking. Allocation (SYS-4):
  * none.
  */
-
 typedef struct ms_context ms_context;
 typedef void (*ms_context_entry)(void *);
 /* Completion hook shape (additive, #66); see ms_context_set_finish_hook. */
 typedef void (*ms_context_finish_fn)(void *userdata);
 
-/* Sideband geometry of the caller-owned save area (see layout above).
- * Compile-time constants surfaced as functions so consumers can bind
- * them without knowing the backend. Since #66 the record carries a
- * per-context lifecycle tail after the frozen v2 prefix: size == 200,
- * alignment == 8 (v2 consumers that sized storage via this getter are
- * unaffected; nothing reads or writes the tail beyond its own record). */
+/* Register ctx's completion hook (additive, #66). See the declaration
+ * near the end of this s5-ctx block for the full contract; this forward
+ * declaration keeps consumers compiling when they include the header
+ * before the block's tail. */
+void ms_context_set_finish_hook(
+    ms_context *ctx,
+    ms_context_finish_fn hook,
+    void *userdata
+);
+
 size_t ms_context_size(void);
 size_t ms_context_alignment(void);
 
@@ -1031,21 +1147,33 @@ int mjs_iouring_entries(mjs_uring *p, unsigned *out_sq, unsigned *out_cq);
 int mjs_iouring_close(mjs_uring **p);
 
 
-/* Register ctx's completion hook (additive, #66): hook(userdata) runs
- * EXACTLY ONCE, on ctx's synthetic stack, after ctx's entry() returns
- * and before the permanent switch-out to the most recent switcher.
- * A context completes at most one lifetime, so a hook fires at most
- * once per record; a hook registered after the context has already
- * FINISHED never fires (the completion pass has already run), and
- * destroy(ctx) discards any registered hook. hook == NULL clears.
- * Non-blocking (SYS-5); no allocation (SYS-4); NULL ctx is a caller
- * bug and is ignored (void entry point, same regime as
- * ms_context_destroy). */
-void ms_context_set_finish_hook(
-    ms_context *ctx,
-    ms_context_finish_fn hook,
-    void *userdata
-);
+/* --- s5-stack --- */
+/*
+ * S5.7 STACK GROWTH POLICY (issue #70, 5-expert panel ruling recorded in
+ * docs §55): NativeContext stack reservations are FIXED — there is NO
+ * automatic software growth and NO grow-on-demand. The enclosing
+ * reservation is created by its OWNER (mjs_stack_alloc is the usual
+ * provider: it paints a PROT_NONE guard page at the low end and returns
+ * guard_low), and growth is the top-down descent over the range the
+ * owner has COMMITTED (mjs_vm_commit / NativeStack.grow). Crossing the
+ * guard floor faults synchronously at the faulting store
+ * (SIGBUS/SIGSEGV) — the library never installs the guard, never
+ * mprotects caller storage, and never soft-grows (SYS-4, ADR-SYS-005).
+ *
+ * The library enforces what it can without an ABI change (the record
+ * stays 200 bytes; the v3 lifecycle tail is fully allocated):
+ *   - ms_context_init rejects stack_low/size combinations that wrap
+ *     (stack_top overflow, -EINVAL);
+ *   - the switch backend traps (brk #0x6b) on a restored sp that is
+ *     NOT 16-aligned (AAPCS64) BEFORE sp goes live — a poisoned or
+ *     corrupt record can never resume into a wild stack pointer;
+ *   - recorded bounds enforcement (sp inside the committed span) is
+ *     the OWNER's job at dispatch: read the saved sp slot (@160) and
+ *     reject to->sp < owner_floor || to->sp > top before switching.
+ * Unguarded static-buffer reservations remain accepted for tests and
+ * compatibility; overflow on them is documented caller error, never a
+ * library promise.
+ */
 
 #ifdef __cplusplus
 }
