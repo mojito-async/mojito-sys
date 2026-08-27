@@ -272,6 +272,32 @@ echo ""
 echo "S5 ctx issue-#70 stack matrix"
 echo "$srows" | sed 's/^/  /'
 
+# ---- issue #68 additions -------------------------------------------------
+echo ""
+echo "== s5_ctx_conformance rows (issue #68)"
+crows=""
+# Permanent T1..T14 conformance suite: C equivalents of the S0 spike's
+# semantics (spec §6.5 / §38.6), at BOTH -O0 and -O2 plus the non-vacuous
+# T14 runtime-independence symbol audit. See
+# tests/s5/ctx/conformance/run.sh.
+out=$(sh "$SCRIPT_DIR/conformance/run.sh" 2>&1)
+st=$?
+printf '%s\n' "$out" | sed 's/^/   | /'
+if [ $st -eq 0 ] && printf '%s' "$out" | grep -q "RESULT: all green"; then
+    crows="$crows conformance O0 PASS
+ conformance O2 PASS
+ conformance T14 PASS
+"
+else
+    crows="$crows conformance FAIL
+"
+    failures=$((failures + 1))
+fi
+
+echo ""
+echo "S5 ctx issue-#68 matrix"
+echo "$crows" | sed 's/^/  /'
+
 echo ""
 echo "S5 ctx issue-#65 matrix"
 echo "$rows" | sed 's/^/  /'
