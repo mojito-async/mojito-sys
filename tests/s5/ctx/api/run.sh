@@ -12,7 +12,8 @@
 #     (wrapper maps the frozen C hard-traps to recoverable raises);
 #   - re-capture revival (capture revives destroyed storage, spec §20).
 #
-# Pure Mojo over the frozen ms_context_* C ABI — ZERO new C symbols.
+# Pure Mojo over the frozen ms_context_* C ABI — zero changes to the frozen
+# record ABI; one additive dispatch shim (mjs_ctx_call).
 #
 # Usage: tests/s5/ctx/api/run.sh    MOJO=/path/to/mojo
 #   Expects to be run from a checkout where `make` works at the repo root.
@@ -44,9 +45,13 @@ if ! make -C "$REPO_ROOT" libmojito_sys.dylib >"$BUILD_DIR/make.log" 2>&1; then
     exit 2
 fi
 
-# The b2 toolchain intermittently crashes while lowering modules that mix
-# @extern bindings with raising code (precedent: tests/s4/time/*/run.sh);
-# retry a bounded number of times, keeping the last output.
+# Mojo 1.0.0b2 deterministically SIGSEGVs (exit 139) while lowering this
+# wrapper: a raising function whose branch-to-raise reaches @extern bindings
+# (verified 5/5 on this host, mojo run and mojo build alike; tracked upstream
+# at github.com/modular/modular issue #7004 with reproducer PR #7005, and in
+# the repo's S5-KIMI3-WORKAROUND-HANDOVER.md). The row is known-red via
+# precommit/known-red.tsv (s5-tests). Retry a bounded number of times in case
+# a newer toolchain lowers it, keeping the last output.
 status=2
 out=""
 attempt=0

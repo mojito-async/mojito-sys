@@ -1280,7 +1280,8 @@ int mjs_iouring_close(mjs_uring **p);
  * destroy(ctx) discards any registered hook. hook == NULL clears.
  * Non-blocking (SYS-5); no allocation (SYS-4); NULL ctx is a caller
  * bug and is ignored (void entry point, same regime as
- * ms_context_destroy). */
+ * ms_context_destroy). (Declared above with the frozen s5-ctx block; the
+ * s5-api section that follows is purely additive.) */
 /* --- s5-api --- */
 /*
  * S5.4 (issue #67): dynamic-dispatch shim. The Mojo NativeContext wrapper

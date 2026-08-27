@@ -337,9 +337,14 @@ echo ""
 echo "== s5_ctx_api rows (issue #67)"
 arows=""
 # Pure-Mojo NativeContext API (mojito_sys/ctx) over the frozen ms_context_*
-# ABI: create/capture/switch two contexts, exactly-once finish hook,
-# destroy + DEAD/FINISHED/RUNNING misuse raising, misaligned-creation
-# rejection, re-capture revival — against the packaged dylib via `mojo run`.
+# ABI. Current row scope on b2: create/capture/destroy/state geometry,
+# misaligned-creation rejection, double-destroy raising, finish-hook
+# registration, re-capture revival. The REAL-switch rows (A->B bounce,
+# exactly-once finish hook, FINISHED/RUNNING misuse on switch) are deferred:
+# mojo 1.0.0b2 crashes lowering the raising-extern wrapper (upstream
+# modular/modular #7004), so switch semantics are proven at the C level by
+# the sentinel/lifecycle lanes and will return to this lane when the
+# toolchain can lower it.
 out=$(sh "$SCRIPT_DIR/api/run.sh" 2>&1)
 st=$?
 printf '%s\n' "$out" | sed 's/^/   | /'
