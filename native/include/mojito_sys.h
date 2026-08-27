@@ -644,6 +644,392 @@ void ms_context_switch(
  * Destroying a currently-running context from inside itself is a
  * caller bug. */
 void ms_context_destroy(ms_context *ctx);
+/* --- s6-socket --- */
+/*
+ * S6.2 non-blocking sockets (issue #74, spec §26). Same return-value
+ * contract as above: 0 == success; negative == -errno; out-params UNTOUCHED
+ * on failure (a NULL out-slot fails with -EFAULT before anything else).
+ *
+ * Blocking (SYS-5): every entry point here performs ONE readiness-agnostic
+ * syscall and never waits for socket readiness. The exceptions:
+ *   - mjs_socket_connect on a BLOCKING socket blocks until the handshake
+ *     completes or fails (on a non-blocking socket it reports -EINPROGRESS
+ *     immediately — a STATUS, like try_lock's -EBUSY);
+ *   - close(2)/shutdown(2) may block inside the kernel only insofar as
+ *     SO_LINGER demands.
+ *
+ * EINTR/EAGAIN policy (spec §38.11): accept/recv/send NEVER retry
+ * internally and NEVER wait — -EINTR and -EAGAIN surface to the caller so
+ * a reactor decides (the Mojo layer maps them to Interrupted/WouldBlock).
+ * The one-shot entry points below cannot be interrupted mid-operation;
+ * their errno passes through unchanged. On darwin, close(2) reports EINTR
+ * only AFTER releasing the descriptor: callers must treat ANY close()
+ * return as final and never retry (the Mojo wrapper closes exactly once).
+ *
+ * Descriptor ownership: fds minted by mjs_socket_socket / returned through
+ * mjs_socket_accept are owned by the caller; exactly ONE successful
+ * mjs_socket_close releases each. Closing an already-closed fd is caller
+ * error (-EBADF surfaces raw).
+ *
+ * Determinism note: an accepted socket INHERITS its listener's O_NONBLOCK
+ * state explicitly (Linux inherits through accept(2), darwin does not) so
+ * downstream WouldBlock behavior is identical across hosts.
+ */
+
+/* Platform-neutral address families / socket types. Values follow POSIX
+ * where hosts agree; AF_INET6 differs numerically (30 darwin / 10 Linux),
+ * so it travels under this neutral spelling. */
+#define MJS_SOCK_STREAM 1
+#define MJS_SOCK_DGRAM  2
+#define MJS_SOCK_INET   2
+#define MJS_SOCK_UNIX   1
+#if defined(__APPLE__)
+#define MJS_SOCK_INET6 30
+#else
+#define MJS_SOCK_INET6 10
+#endif
+
+/* Shutdown halves (mjs_socket_shutdown `how`). */
+#define MJS_SHUT_READ  0
+#define MJS_SHUT_WRITE 1
+#define MJS_SHUT_BOTH  2
+
+/* Platform-neutral socket address (SYS-3: fixed layout, no OS sockaddr
+ * struct leaks across the firewall). Port is HOST byte order; conversion
+ * happens inside the C layer. octets holds IPv4 bytes in [0..3] (rest
+ * zero) or all 16 IPv6 bytes; path holds a NUL-terminated unix path of at
+ * most 103 chars (+ NUL). Layout is byte-stable: int32 @0, uint16 @4,
+ * pad @6, uint32 flowinfo @8, uint32 scope_id @12, octets @16..31,
+ * path @32..135; sizeof == 136 on LP64 hosts. */
+typedef struct mjs_sockaddr {
+    int32_t family;
+    uint16_t port;      /* host byte order */
+    uint16_t _pad0;
+    uint32_t flowinfo;  /* IPv6 flow label; ignored otherwise */
+    uint32_t scope_id;  /* IPv6 scope id; ignored otherwise */
+    unsigned char octets[16];
+    char path[104];
+} mjs_sockaddr;
+
+/* Create a socket of `family` (MJS_SOCK_*) and `type` (MJS_SOCK_*). An
+ * unknown family/type is -EINVAL with *out_fd untouched. On success stores
+ * the owned descriptor in *out_fd. Non-blocking (SYS-5); no allocation. */
+int mjs_socket_socket(int family, int type, int *out_fd);
+
+/* Set/clear O_NONBLOCK on `fd`. Unknown flags state is never assumed: the
+ * current F_GETFL flags are read-modify-written. Non-blocking (SYS-5). */
+int mjs_socket_set_nonblocking(int fd, int enabled);
+
+/* Bind `fd` to the platform-neutral address. The port travels in HOST byte
+ * order and is converted inside. A NULL addr is -EFAULT; an unconvertible
+ * family is -EINVAL; a too-long unix path (>= its sun_path) is
+ * -ENAMETOOLONG. Non-blocking (SYS-5). */
+int mjs_socket_bind(int fd, const mjs_sockaddr *addr);
+
+/* Mark `fd` as passive with `backlog`. backlog < 0 is -EINVAL. On success
+ * the socket may yield connections via mjs_socket_accept. Non-blocking
+ * (SYS-5). */
+int mjs_socket_listen(int fd, int backlog);
+
+/* Initiate a connection to `addr`. On a BLOCKING socket this blocks until
+ * the handshake settles (SYS-5). On a non-blocking socket it returns
+ * -EINPROGRESS as a documented STATUS: the connection attempt continues;
+ * callers await writability to learn the outcome. A NULL addr is -EFAULT.
+ * Connection failures on a blocking socket surface as their errno
+ * (-ECONNREFUSED, -ECONNRESET, ...). */
+int mjs_socket_connect(int fd, const mjs_sockaddr *addr);
+
+/* Extract ONE pending connection from listener `fd`. NEVER blocks or waits
+ * (SYS-5): without a queued peer it returns -EAGAIN immediately; -EINTR
+ * surfaces raw for the caller to retry. On success stores the owned client
+ * descriptor in *out_client and, when out_peer is non-NULL, the peer
+ * address in *out_peer (out_client/out_peer untouched on failure). The
+ * accepted socket inherits the listener's O_NONBLOCK state deterministically. */
+int mjs_socket_accept(int fd, int *out_client, mjs_sockaddr *out_peer);
+
+/* ONE recv(2) attempt on `fd` into buf[0..len); NEVER waits (SYS-5).
+ * Success: 0 with *out_n = bytes received; *out_n == 0 means orderly EOF.
+ * len == 0 is -EINVAL. Partial receives are normal and reported as-is.
+ * -EAGAIN/-EWOULDBLOCK when no data is ready; -EINTR surfaces raw; any
+ * other errno passes through unchanged (-ECONNRESET after peer reset).
+ * buf NULL or out_n NULL with len > 0 is -EFAULT. */
+int mjs_socket_recv(int fd, unsigned char *buf, size_t len, size_t *out_n);
+
+/* ONE send(2) attempt on `fd` from buf[0..len); NEVER waits (SYS-5).
+ * Success: 0 with *out_n = bytes ACCEPTED by the kernel (which may be a
+ * PARTIAL prefix of len — callers must loop over the remainder). len == 0
+ * is -EINVAL. -EAGAIN/-EWOULDBLOCK when the send buffer is full; -EINTR
+ * surfaces raw; other errnos pass through unchanged. buf NULL or out_n
+ * NULL with len > 0 is -EFAULT. */
+int mjs_socket_send(int fd, const unsigned char *buf, size_t len,
+                    size_t *out_n);
+
+/* Shut down one/both transfer halves: how is MJS_SHUT_READ/WRITE/BOTH.
+ * Anything else is -EINVAL. Non-blocking (SYS-5). */
+int mjs_socket_shutdown(int fd, int how);
+
+/* Close `fd`, releasing the descriptor exactly once per call. ANY return
+ * value is FINAL: never retry close (darwin reports EINTR only after the
+ * descriptor is already released). fd < 0 is -EBADF. Blocking (SYS-5):
+ * only inside the kernel per SO_LINGER. */
+int mjs_socket_close(int fd);
+
+/* ---- sockaddr helpers ---------------------------------------------------
+ * Address conversion between dotted-quad text and the neutral layout.
+ * Same contract: 0 / negative -errno; out-params untouched on failure.
+ * Non-blocking (SYS-5); no allocation beyond libc's fixed buffers. */
+
+/* Parse dotted-quad IPv4 text into *out with host-order `port`.
+ * Malformed text (inet_pton != 1), port outside [0, 65535], or a NULL
+ * argument is -EFAULT/-EINVAL with *out untouched. */
+int mjs_sockaddr_ipv4(const char *dotted, int port, mjs_sockaddr *out);
+
+/* Format the IPv4 address in *addr as dotted-quad text into out_buf
+ * (NUL-terminated). Requires addr->family == MJS_SOCK_INET (-EINVAL
+ * otherwise); cap < needed length (incl. NUL) is -EINVAL. Stores the
+ * string length (no NUL) in *out_len on success. */
+int mjs_sockaddr_format4(const mjs_sockaddr *addr, char *out_buf,
+                         size_t cap, size_t *out_len);
+
+/* --- s6-poller --- */
+/*
+ * S6.3 readiness poller (issue #75, spec §27.1/§29/§31). Same
+ * return-value contract as above: 0 == success; negative == -errno;
+ * out-params UNTOUCHED on failure.
+ *
+ * BACKEND GUARD: this block is kqueue-backed. Hosts without kqueue
+ * return EXACTLY -ENOSYS from every entry point (detect-and-exclude,
+ * mirroring the s3-atomic-wait contract); *out slots stay untouched.
+ *
+ * Interests and events travel in one neutral bitmask:
+ *   MJS_POLL_READABLE / MJS_POLL_WRITABLE are REGISTERABLE interests;
+ *   MJS_POLL_EOF / MJS_POLL_ERROR are EVENT-ONLY flags, never accepted
+ *   as interests (-EINVAL when passed to register/modify).
+ *
+ * Edge doctrine (spec §29): registrations use edge/clear semantics — a
+ * readiness transition is reported ONCE per transition; callers drain
+ * (read/write until WouldBlock) or re-arm by state change. The platform
+ * spelling (EV_CLEAR) stays BELOW this platform-neutral wrapper.
+ *
+ * Duplicate registration / modify: re-registering a live descriptor is
+ * an UPSERT — the LAST register/modify wins for BOTH interests and
+ * token (verified against darwin kevent re-add updates udata).
+ * unregister of a not-registered descriptor succeeds (0), so
+ * unregister/reuse races degrade to no-ops, never errors.
+ *
+ * Token: completely opaque upstream identity (spec §31); preserved
+ * EXACTLY through every delivered event (64-bit value travels verbatim
+ * in kevent.udata). Generation checking belongs to mojito-async.
+ *
+ * Wake: mjs_poller_wake makes at most ONE blocked wait return 0 events.
+ * A wake with NO waiter STICKS: exactly one later wait returns promptly
+ * with zero events (EVFILT_USER + EV_CLEAR; signals coalesce like the
+ * s3-event token). wake NEVER blocks (SYS-5); only wait blocks its
+ * calling OS thread, bounded by timeout_ns.
+ *
+ * wait status mapping:
+ *   0        — success; *out_n carries 0..cap events (0 == timeout);
+ *              wake deliveries NEVER occupy an out slot but DO end the
+ *              wait early (possibly with *out_n == 0);
+ *   -EINTR   — interrupted before any event: raw -EINTR, caller retries
+ *              (§38.11 interrupt/retry doctrine);
+ *   other    — genuine error, negative -errno verbatim.
+ * Events beyond cap are DROPPED (callers loop). cap == 0 is -EINVAL.
+ *
+ * EOF/error delivery: EVFILT_READ/WRITE reporting EV_EOF sets
+ * MJS_POLL_EOF; a NEGATIVE data field under EV_EOF (e.g. ECONNRESET on
+ * a reset socket) additionally sets MJS_POLL_ERROR (spec §38.7
+ * error/hangup + kqueue-specific cases).
+ *
+ * Handle lifetime: create yields an owned opaque handle in *out; close
+ * CONSUMES it (**p NULLed on success). Any use of a consumed or NULL
+ * handle is a deterministic -EINVAL. The poller is NON-OWNING: closing
+ * it never closes registered descriptors (spec §25 borrow rule).
+ * Closing a REGISTERED descriptor silently retires its knotes (kqueue
+ * close-out); no event fires, later waits simply report nothing.
+ *
+ * Blocking (SYS-5): ONLY mjs_poller_wait may block (bounded by
+ * timeout_ns when non-NULL); register/modify/unregister/wake/close
+ * never block.
+ * Allocation (SYS-4): one fixed-size handle at create; NONE afterwards
+ * (the kevent changelist lives on the C stack).
+ * Task-aware: no — OS-thread granularity per spec §14.
+ */
+
+/* Registerable interests (OR-ed). */
+#define MJS_POLL_READABLE 0x1u
+#define MJS_POLL_WRITABLE 0x2u
+
+/* Event-only flags (OR-ed into mjs_poll_event.events). */
+#define MJS_POLL_EOF      0x4u
+#define MJS_POLL_ERROR    0x8u
+
+/* One delivered readiness event. Fixed scalar layout — token@0, fd@8,
+ * events@12; 16 bytes, 8-byte alignment — so FFI consumers decode with
+ * SCALAR loads only (no aggregate reads in extern-reaching frames). */
+typedef struct mjs_poll_event {
+    uint64_t token;  /* opaque registration token, preserved exactly */
+    int32_t fd;      /* ready descriptor */
+    uint32_t events; /* MJS_POLL_* flags for THIS event */
+} mjs_poll_event;
+
+/* Opaque native poller handle (SYS-3). */
+typedef struct mjs_poller mjs_poller;
+
+/* Create a readiness poller (kqueue-backed; internal EVFILT_USER wake
+ * source pre-registered). On success returns 0 and stores the handle in
+ * *out; NULL out-slot is -EFAULT with *out untouched. Without a kqueue
+ * backend returns exactly -ENOSYS with *out untouched. */
+int mjs_poller_create(mjs_poller **out);
+
+/* Register `fd` for `interests` with opaque `token`. Re-registration of
+ * a live fd UPSERTS (last interests+token win); event-only flag bits in
+ * `interests` are -EINVAL. Non-blocking (SYS-5). */
+int mjs_poller_register(mjs_poller *p, int fd, uint32_t interests,
+                        uint64_t token);
+
+/* Modify an existing registration atomically-from-the-caller's-view:
+ * same upsert contract as register; filters dropped from `interests`
+ * are removed (a not-present filter deletes as a no-op). */
+int mjs_poller_modify(mjs_poller *p, int fd, uint32_t interests,
+                      uint64_t token);
+
+/* Remove ALL filters for `fd`. Not-registered descriptors succeed (0);
+ * only real kernel errors (-errno) fail. Non-blocking (SYS-5). */
+int mjs_poller_unregister(mjs_poller *p, int fd);
+
+/* Wait for readiness on ANY registered descriptor into `events` (up to
+ * cap entries; cap == 0 is -EINVAL). timeout_ns: NULL = block until an
+ * event/wake; *timeout_ns == 0 = non-blocking poll; otherwise relative
+ * nanoseconds. Timeout expiry is SUCCESS with *out_n == 0. Returns
+ * -EINTR raw for retry; out_n untouched on failure. Blocking (SYS-5):
+ * parks the calling OS thread per the timeout contract ONLY. */
+int mjs_poller_wait(mjs_poller *p, mjs_poll_event *events, unsigned cap,
+                    const uint64_t *timeout_ns, unsigned *out_n);
+
+/* Make at most ONE blocked wait return promptly with zero events. A
+ * wake with no waiter sticks for exactly one later wait. Coalescing:
+ * N wakes while nobody waits still release exactly ONE wait. Never
+ * blocks (SYS-5). Allocation: none. */
+int mjs_poller_wake(mjs_poller *p);
+
+/* Destroy the poller and free its handle: *p is NULLed on success, so
+ * any later use (including a second destroy) is a deterministic
+ * -EINVAL. Registered DESCRIPTORS are NOT closed. On failure the
+ * handle is NOT consumed. NULL or NULLed *p is -EINVAL. */
+/* --- s6-ioring --- */
+/*
+ * S6.6 EXPERIMENTAL io_uring readiness backend (issue #78, spec §28/§30/
+ * §27.2/§31). Same return-value contract as above: 0 == success; negative
+ * == -errno; out-params UNTOUCHED on failure.
+ *
+ * EXPERIMENTAL / CAPABILITY FLAGGED (spec §28): io_uring MUST remain behind
+ * a capability/feature flag until operation coverage, cancellation
+ * semantics, kernel-version behavior and benchmarks are understood. A ring
+ * is ONLY instantiated when the host kernel supports io_uring AND the
+ * explicit environment flag MOJITO_IO_URING=1 is set; otherwise
+ * mjs_iouring_create returns EXACTLY -ENOSYS. mjs_iouring_available() is
+ * the authoritative capability predicate; mjs_iouring_probe() tests host
+ * kernel support alone.
+ *
+ * BACKEND GUARD: this block is io_uring-backed on Linux only. Hosts without
+ * io_uring (e.g. Darwin) return EXACTLY -ENOSYS from every entry point that
+ * requires a live ring (detect-and-exclude, mirroring the s6-poller kqueue
+ * block); mjs_iouring_probe/available return 0 there.
+ *
+ * The interests/event bitmask and the mjs_poll_event wire format are shared
+ * with the s6-poller block (same MJS_POLL_* flags, same 16-byte layout), so
+ * the §27.1 ReadinessPoller surface is drop-in across backends.
+ *
+ * Readiness semantics: one-shot edge polls (IORING_OP_POLL_ADD) re-armed
+ * after each delivery (§29 edge doctrine below the wrapper). register/
+ * modify UPSERT (last interests+token win); unregister of a not-registered
+ * descriptor is a no-op (0). Tokens ride through poll user_data and are
+ * preserved EXACTLY in delivered events (§31). EOF/error map from POLLHUP
+ * -> MJS_POLL_EOF and POLLERR -> MJS_POLL_ERROR.
+ *
+ * Wake: mjs_iouring_wake makes at most ONE blocked wait return 0 events. A
+ * wake with no waiter STICKS (the eventfd byte stays pending for exactly
+ * one later wait). wake NEVER blocks (SYS-5); only mjs_iouring_wait parks
+ * its calling OS thread, bounded by timeout_ns.
+ *
+ * wait status mapping:
+ *   0        — success; *out_n carries 0..cap events (0 == timeout);
+ *              wake deliveries NEVER occupy an out slot but DO end the
+ *              wait early;
+ *   -EINTR   — interrupted before any event: raw -EINTR, caller retries
+ *              (§38.11); timeout expiry is success-with-zero;
+ *   other    — genuine error, negative -errno verbatim.
+ * Events beyond cap are DROPPED (callers loop). cap == 0 is -EINVAL.
+ *
+ * Handle lifetime: create yields an owned opaque handle in *out; close
+ * CONSUMES it (**p NULLed on success). Any use of a consumed or NULL handle
+ * is a deterministic -EINVAL. The backend is NON-OWNING: closing it never
+ * closes registered descriptors (§25 borrow rule). Closing a REGISTERED
+ * descriptor silently retires its poll (§31 close-while-registered).
+ *
+ * Blocking (SYS-5): ONLY mjs_iouring_wait may block (bounded by timeout_ns
+ * when non-NULL); register/modify/unregister/wake/close/probe never block.
+ * Allocation (SYS-4): one ring handle + its fd/token tables at create; a
+ * fixed number of SQEs and ring pages afterwards.
+ * Task-aware: no — OS-thread granularity per spec §14.
+ */
+
+/* Opaque native io_uring backend handle (SYS-3). */
+typedef struct mjs_uring mjs_uring;
+
+/* Pure predicate: does THIS KERNEL support io_uring? Returns 1 if a tiny
+ * setup probe succeeds, 0 otherwise. Never blocks. */
+int mjs_iouring_probe(void);
+
+/* Full capability predicate (spec §28): host io_uring support AND
+ * MOJITO_IO_URING=1 set. Returns 1 iff a ring can be created. Never blocks. */
+int mjs_iouring_available(void);
+
+/* Create an io_uring-backed readiness ring. On success returns 0 and stores
+ * the handle in *out; NULL out-slot is -EFAULT with *out untouched. Without
+ * host support or the capability flag returns EXACTLY -ENOSYS with *out
+ * untouched. */
+int mjs_iouring_create(mjs_uring **out);
+
+/* Register `fd` for `interests` with opaque `token`. Re-registration of a
+ * live fd UPSERTS (last interests+token win); event-only flag bits in
+ * `interests` are -EINVAL. Non-blocking (SYS-5). */
+int mjs_iouring_register(mjs_uring *p, int fd, uint32_t interests,
+                         uint64_t token);
+
+/* Modify an existing registration (same upsert contract as register).
+ * Non-blocking (SYS-5). */
+int mjs_iouring_modify(mjs_uring *p, int fd, uint32_t interests,
+                       uint64_t token);
+
+/* Remove the registration for `fd`. Not-registered descriptors succeed (0);
+ * only real kernel errors (-errno) fail. Non-blocking (SYS-5). */
+int mjs_iouring_unregister(mjs_uring *p, int fd);
+
+/* Wait for readiness on ANY registered descriptor into `events` (up to cap
+ * entries; cap == 0 is -EINVAL). timeout_ns: NULL = block until an
+ * event/wake; *timeout_ns == 0 = non-blocking poll; otherwise relative
+ * nanoseconds. Timeout expiry is SUCCESS with *out_n == 0. Returns -EINTR
+ * raw for retry; out_n untouched on failure. Blocking (SYS-5): parks the
+ * calling OS thread per the timeout contract ONLY. */
+int mjs_iouring_wait(mjs_uring *p, mjs_poll_event *events, unsigned cap,
+                     const uint64_t *timeout_ns, unsigned *out_n);
+
+/* Make at most ONE blocked wait return promptly with zero events. A wake
+ * with no waiter sticks for exactly one later wait. Never blocks (SYS-5). */
+int mjs_iouring_wake(mjs_uring *p);
+
+/* Report the configured SQ and CQ entry counts (SQ/CQ geometry, §38.7
+ * io_uring-specific "SQ/CQ growth"). Non-blocking. */
+int mjs_iouring_entries(mjs_uring *p, unsigned *out_sq, unsigned *out_cq);
+
+/* Destroy the backend and free its handle: *p is NULLed on success, so any
+ * later use (including a second destroy) is a deterministic -EINVAL.
+ * Registered DESCRIPTORS are NOT closed. On failure the handle is NOT
+ * consumed. NULL or NULLed *p is -EINVAL. */
+int mjs_iouring_close(mjs_uring **p);
+
 
 /* Register ctx's completion hook (additive, #66): hook(userdata) runs
  * EXACTLY ONCE, on ctx's synthetic stack, after ctx's entry() returns
