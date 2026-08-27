@@ -269,6 +269,10 @@ def probe_poller_wake(p: PollerPtr) -> Int32:
     return mjs_poller_wake(p)
 
 
+def probe_poller_close(p: PollerSlot) -> Int32:
+    return mjs_poller_close(p)
+
+
 # ---- s6-ioring bindings (issue #78) ------------------------------------------
 #
 # Same LEAF discipline as the s6-poller/s6-socket bindings above: raw @extern
