@@ -56,6 +56,7 @@ ms_context_init
 ms_context_capture
 ms_context_switch
 ms_context_destroy
+ms_context_set_finish_hook
 mjs_socket_socket
 mjs_socket_set_nonblocking
 mjs_socket_bind

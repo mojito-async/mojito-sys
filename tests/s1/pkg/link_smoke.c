@@ -4,10 +4,10 @@
  * currently-implemented entry points (the set pinned by exports.txt):
  *   - mjs_abi_version() must report MOJITO_SYS_ABI_VERSION (frozen-ABI
  *     negotiation works for a dynloading consumer);
- *   - mjs_page_size() must be positive;
- *   - ms_context_size()/ms_context_alignment() must report the frozen v2
- *     save-area geometry (issue #64): 168 bytes = regs[12] + fps[8] + sp,
- *     with a power-of-two alignment that divides the size.
+ *   - ms_context_size()/ms_context_alignment() must report the record
+ *     geometry: since #66, 200 bytes = frozen v2 prefix (regs[12] +
+ *     fps[8] + sp = 168) + the 4-slot per-context lifecycle tail, with
+ *     a power-of-two alignment that divides the size.
  */
 
 #include "mojito_sys.h"
@@ -24,9 +24,11 @@ int main(void) {
         return 3;
     if (mjs_page_size() <= 0)
         return 4;
-    /* --- s5-ctx (issue #64): frozen v2 context geometry. --- */
-    if (ms_context_size() != 168)
-        return 5; /* regs[12] x19-x30 @0 + fps[8] d8-d15 @96 + sp @160 */
+    /* --- s5-ctx: record geometry. Since #66 the record is the frozen
+     *     v2 prefix (168 = regs[12] x19-x30 @0 + fps[8] d8-d15 @96 + sp
+     *     @160) plus a 4-slot per-context lifecycle tail = 200 bytes. --- */
+    if (ms_context_size() != 200)
+        return 5;
     {
         size_t align = ms_context_alignment();
         if (align < sizeof(void *) || (align & (align - 1)) != 0 ||
