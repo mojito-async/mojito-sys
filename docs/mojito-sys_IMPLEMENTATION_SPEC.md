@@ -2837,3 +2837,42 @@ initial `sp` (stack_low + stack_size) must be 16-byte aligned (AAPCS64), i.e.
 stack_size must be a nonzero multiple of 16 and stack_low 16-byte aligned —
 violations are rejected with -EINVAL by `ms_context_init` (or trap #0x64 at
 make). This is asserted by the docs probe's misalignment row.
+
+# 55. S5.7 stack-growth policy — decision record (issue #70)
+
+**Status:** RULED (5-expert adversarial panel: Architecture / mojo+Clang
+Systems / Safety+Reliability / API Design / OS-kernel). **Applies to:**
+NativeContext reservations (epic S5), consistent with S1 NativeStack.
+
+**Policy.** A NativeContext stack reservation is a FIXED interval
+`[stack_low, stack_low+stack_size)` with NO automatic growth and NO
+relocation (ADR-SYS-005). The stack grows top-down over the range the
+OWNER has committed (mjs_stack_alloc paints a PROT_NONE guard page below
+the usable floor and returns guard_low; the owner commits more span via
+mjs_vm_commit). Crossing the floor faults synchronously at the offending
+store (SIGBUS on macOS/arm64, SIGSEGV on Linux) — the MMU is the ONLY
+mechanism that can catch an overflow that happens BETWEEN switch points;
+a software sp check at the next save runs AFTER the corrupting write and
+can diagnose but never prevent.
+
+**Enforcement split (no ABI change; record stays 200 bytes; the v3
+lifecycle tail @168-199 remains fully allocated to the state machine).**
+- ms_context_init: rejects stack_top wrap (stack_low + size fold) with
+  -EINVAL; keeps 16-alignment and NULL checks (frozen).
+- Switch backend: traps (brk #0x6b) on a restored sp that is not
+  16-aligned (AAPCS64), BEFORE sp goes live — a poisoned record cannot
+  resume into a wild stack pointer.
+- OWNER (mojito-async dispatcher): validates the saved sp slot (@160)
+  against its own guard_low/top before switching; treats a guard fault
+  as a fatal, diagnosable task error (never corruption).
+- Unguarded static-buffer reservations stay accepted for tests/compat;
+  overflow on them is documented caller error.
+
+**Must-not-do (panel).** Grow the record 200→216 (frozen ABI, caller
+visible); store bounds in the v3 tail (no free slot); mprotect caller-
+provided storage from the library (ownership + partial-page collateral);
+add a library allocation/ownership API (SYS-4, second ownership regime);
+per-switch software sp-vs-floor checks as enforcement (cannot prevent);
+SIGSEGV-handler soft growth (hidden allocation); test with fixed
+recursion counts (frame size varies with -O level — depth must be a
+derived result).
