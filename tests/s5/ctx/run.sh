@@ -249,6 +249,32 @@ else
     failures=$((failures + 1))
 fi
 
+# ---- issue #71 additions (debug/unwind + platform-notes docs lane) -------
+echo ""
+echo "== s5_ctx_docs rows (issue #71)"
+drows=""
+# Documentation lane: the DOC is the deliverable; the fixture (docs/run.sh
+# -> doc_probe.c) asserts the documented claims compile and hold against the
+# packaged dylib — spec §54 marker check (docs present), lifecycle traps via
+# SIGTRAP on misuse (brk #0x66/#0x68/#0x69 in fork children), the documented
+# state machine (incl. capture REVIVE), and loud -EINVAL misalignment
+# rejection — at BOTH -O0 and -O2.
+out=$(sh "$SCRIPT_DIR/docs/run.sh" 2>&1)
+st=$?
+printf '%s\n' "$out" | sed 's/^/   | /'
+if [ $st -eq 0 ] && printf '%s' "$out" | grep -q "RESULT: all green"; then
+    drows="$drows docs O0 PASS
+ docs O2 PASS
+"
+else
+    drows="$drows docs FAIL
+"
+    failures=$((failures + 1))
+fi
+
+echo ""
+echo "S5 ctx docs matrix (issue #71)"
+echo "$drows" | sed 's/^/  /'
 echo "== s5_ctx_stack rows (issue #70)"
 srows=""
 # Stack-growth policy (#70): contained growth on an mjs_stack_alloc
