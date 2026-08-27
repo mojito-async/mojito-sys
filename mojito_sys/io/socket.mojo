@@ -100,6 +100,13 @@ def _connect_pending_rc() -> Int32:
     return Int32(115)
 
 
+def _host_enametoolong() -> Int32:
+    # ENAMETOOLONG: 63 darwin / 36 Linux — overlong Unix path in to_buffer().
+    if CompilationTarget().is_macos():
+        return Int32(63)
+    return Int32(36)
+
+
 # ---- neutral sockaddr buffer geometry --------------------------------------
 # Byte layout of struct mjs_sockaddr (frozen in the header): int32 family@0,
 # uint16 port(host order)@4, pad@6, uint32 flowinfo@8, uint32 scope_id@12,
@@ -179,6 +186,12 @@ comptime ATTEMPT_WOULD_BLOCK = UInt8(1)
 comptime ATTEMPT_INTERRUPTED = UInt8(2)
 comptime ATTEMPT_ERROR = UInt8(3)
 comptime ATTEMPT_CLOSED = UInt8(4)
+# IoAttempt READY-payload flavor (panel fold — #76): the single carrier
+# ships TWO distinct READY payload shapes, an accepted socket descriptor
+# and a byte count. Cross-kind access must fail LOUD (decoded -EINVAL),
+# never silently read the wrong cell as 0 / a bogus fd.
+comptime PAYLOAD_FD = UInt8(0)     # READY payload is take_ready_fd()
+comptime PAYLOAD_COUNT = UInt8(1)  # READY payload is ready_count()
 
 
 # Classify a raw C rc from accept/recv/send into its IoAttempt kind tag.
@@ -231,17 +244,20 @@ struct IoAttempt(Movable):
     var err: Int32    # positive errno when kind == ERROR, else 0
     var count: Int    # READY byte-count payload (recv/send)
     var fd: Int32     # READY accepted-descriptor payload; NO_FD after take
+    var payload: UInt8  # READY payload flavor: PAYLOAD_FD or PAYLOAD_COUNT
 
     def __init__(out self):
         self.kind = ATTEMPT_ERROR
         self.err = 0
         self.count = 0
         self.fd = NO_FD
+        self.payload = PAYLOAD_FD
 
     @staticmethod
     def ready_count(n: Int) -> IoAttempt:
         var a = IoAttempt()
         a.kind = ATTEMPT_READY
+        a.payload = PAYLOAD_COUNT
         a.count = n
         return a^
 
@@ -249,6 +265,7 @@ struct IoAttempt(Movable):
     def ready_fd(accepted_fd: Int32) -> IoAttempt:
         var a = IoAttempt()
         a.kind = ATTEMPT_READY
+        a.payload = PAYLOAD_FD
         a.fd = accepted_fd
         return a^
 
@@ -298,12 +315,24 @@ struct IoAttempt(Movable):
         return self.err
 
     # The READY byte-count payload (recv/send attempts).
-    def ready_count(self) -> Int:
+    #
+    # Cross-kind misuse is LOUD (panel fold — #76): reading a count off a
+    # socket-fd (or any non-ready) attempt raises decoded -EINVAL instead
+    # of silently returning 0.
+    def ready_count(self) raises -> Int:
+        if (not self.is_ready()) or (self.payload != PAYLOAD_COUNT):
+            raise_errno(EINVAL_RC)
         return self.count
 
     # Consume the READY accepted-descriptor payload (accept attempts).
     # Single-take: the fd cell resets to NO_FD afterwards.
-    def take_ready_fd(mut self) -> Int32:
+    #
+    # Cross-kind misuse is LOUD (panel fold — #76): taking an fd off a
+    # count (or any non-ready) attempt raises decoded -EINVAL instead of
+    # silently returning NO_FD.
+    def take_ready_fd(mut self) raises -> Int32:
+        if (not self.is_ready()) or (self.payload != PAYLOAD_FD):
+            raise_errno(EINVAL_RC)
         var taken = self.fd
         self.fd = NO_FD
         return taken
@@ -437,13 +466,18 @@ struct SocketAddress(Movable):
     # grade path, not hot). Task-aware: no.
     # Serialize into a 136-byte neutral buffer (scalar stores ONLY — this
     # pointer becomes the opaque const mjs_sockaddr* across the ABI).
-    def to_buffer(self, cell: UnsafePointer[Int64, MutAnyOrigin]):
+    def to_buffer(self, cell: UnsafePointer[Int64, MutAnyOrigin]) raises:
         var p = _buf_of(cell)
         var z = 0
         while z < SOCKADDR_BYTES:
             p[z] = Byte(0)
             z += 1
         _st_i32(p, 0, self.family)
+        # Port is a 16-bit field: reject out-of-range up front (decoded
+        # -EINVAL) rather than silently wrapping through UInt16() (panel
+        # fold — #76).
+        if self.port < 0 or self.port > 0xFFFF:
+            raise_errno(EINVAL_RC)
         _st_u16(p, 4, UInt16(self.port))
         _st_u32(p, 8, self.flowinfo)
         _st_u32(p, 12, self.scope_id)
@@ -465,8 +499,10 @@ struct SocketAddress(Movable):
                 unsafe_from_address=Int(src)
             )
             var n = len(self.path)
+            # Panel fold — #76: an overlong Unix path must FAIL LOUD (decoded
+            # -ENAMETOOLONG) rather than silently truncate into the buffer.
             if n > UNIX_PATH_MAX:
-                n = UNIX_PATH_MAX
+                raise_errno(-_host_enametoolong())
             var i = 0
             while i < n:
                 _st8(p, 32 + i, sbp[i])
