@@ -1,21 +1,23 @@
 #!/bin/sh
 # mojito-sys S3.6 — cross-primitive integration + phase audits runner
-# (issue #62). Closes the S3 phase: drives ALL FOUR sync primitives
-# against each other (conformance.mojo) and runs the executable
-# repo-convention audits (audit_sync.sh), plus a package-path import
-# check for the whole S3 surface.
+# (issue #62). Closes the S3 phase: drives the sync primitives against
+# each other (conformance.mojo) and runs the executable repo-convention
+# audits (audit_sync.sh), plus a package-path import check for the whole
+# S3 surface.
 #
-# DEFERRED (issue #62 phase close): the §14 NativeSemaphore
-# permit-accounting leg is NOT covered by this suite — no lane, conformance
-# row, or audit exists for it repo-wide. Explicitly deferred at the S3
-# batch-panel review; tracked by a dedicated follow-up issue (filed
-# separately when #62 closes). Do not treat the S3 phase as covering
-# semaphores.
+# Permit accounting (issue #106): the §14 NativeSemaphore permit-accounting
+# leg formerly recorded DEFERRED at the #62 phase close is now covered by
+# the dedicated s3-semaphore lane (tests/s3/sync/semaphore, auto-discovered
+# by tests/s3/run.sh); this suite drives that lane's runner as the real
+# s3-semaphore-permits row so the phase audit reflects it directly.
 #
 # Rows:
 #   s3-integration-mojo     — bounded buffer 8x8x100k + 50k park/unpark
 #                             churn + cross-primitive wrapper decode
 #                             (AOT-built per the b2 note in tests/s2);
+#   s3-semaphore-permits    — the s3-semaphore lane (permit-accounting
+#                             conformance: P/V balance, multi-permit,
+#                             try_wait, expiry, no-negative, misuse);
 #   s3-audit-sys5-trio      — every public def carries the SYS-5 trio;
 #   s3-audit-static-claims  — no false "b2 lacks @staticmethod" claims;
 #   s3-audit-exports        — exports.txt <-> nm exact, ALL S3 symbols;
@@ -117,9 +119,21 @@ else
 "
 fi
 
+# ---- permit-accounting leg (issue #106): drive the s3-semaphore lane --------
+echo "== s3-semaphore-permits (permit-accounting lane)"
+sem_out=$(sh "$SCRIPT_DIR/../semaphore/run.sh" 2>&1)
+sem_status=$?
+printf '%s\n' "$sem_out" | sed 's/^/   | /'
+if [ $sem_status -eq 0 ] && printf '%s' "$sem_out" | grep -q "RESULT: all green"; then
+    matrix="${matrix}s3-semaphore-permits PASS
+"
+else
+    matrix="${matrix}s3-semaphore-permits FAIL
+"
+fi
+
 echo ""
 echo "S3.6 sync integration + phase audit matrix (issue #62)"
-echo "  s3-semaphore-permits DEFERRED (§14 permit-accounting leg; follow-up issue)"
 printf '%s' "$matrix" | sed 's/^/  /'
 case "$matrix" in
     *FAIL*)

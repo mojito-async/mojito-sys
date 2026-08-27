@@ -100,6 +100,7 @@
 #define MS_FUNC_END(name)            .size name, .-name
 #endif
 
+#if defined(__aarch64__)
 MS_TEXT
 
 /* v2 save-area offsets (frozen; pinned by _Static_asserts in ms_context.c) */
@@ -332,3 +333,4 @@ MS_SYM(mjs_ctx_trampoline):
         MS_TAIL(ms_context_switch)              /* tail call: switch(self, ret_to) */
 2:      brk     #0x6a                           /* never fall through (§22 L1173) */
 MS_FUNC_END(mjs_ctx_trampoline)
+#endif /* __aarch64__ */

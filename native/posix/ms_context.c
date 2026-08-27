@@ -1,9 +1,12 @@
 /*
  * ms_context.c — dispatch half of the frozen ms_context v2 C ABI
  * (issue #64, spec §20.2).
- * The register-level half lives in ms_context_aarch64.S, a single macro
- * skeleton serving both Darwin Mach-O and Linux ELF (S5.2, issue #65).
- * This file owns everything that is portable C:
+ * A register-level half lives in ms_context_aarch64.S (a single macro
+ * skeleton serving both Darwin Mach-O and Linux ELF; S5.2, issue #65) and,
+ * on x86-64 System V targets, in ms_context_x86_64.S (S5.9, issue #72) —
+ * the two backends share the exact same frozen layout and primitives, so
+ * all of this file's portable C is backend-agnostic. This file owns
+ * everything that is portable C:
  *   - the frozen v2 save-area definition plus the v3 lifecycle tail
  *     (#66), pinned by _Static_asserts to the offsets the asm hardcodes;
  *   - the sideband geometry getters;
@@ -73,12 +76,24 @@ _Static_assert(offsetof(struct ms_context, state) == 168 &&
                    offsetof(struct ms_context, finish_cb) == 184 &&
                    offsetof(struct ms_context, finish_ud) == 192,
                "lifecycle tail offsets must match ms_context_aarch64.S");
+/* S5.9 (#72): x86-64 System V backend. It reuses the SAME frozen v2/v3
+ * layout and the SAME dylib-private extern below (the asm files select
+ * themselves by target arch; ms_context_x86_64.S is arch-guarded so it is
+ * an empty object on non-x86-64 hosts). The v2 prefix pins above therefore
+ * hold for both backends unchanged; this guarded assert keeps the pairing
+ * with ms_context_x86_64.S explicit without touching the ARM half. */
+#if defined(__x86_64__)
+_Static_assert(offsetof(struct ms_context, sp) + sizeof(uint64_t) == 168,
+               "x86-64 sp slot (rsp) must end exactly at the frozen "
+               "168-byte v2 prefix, as ms_context_x86_64.S assumes");
+#endif
 
 size_t ms_context_size(void) { return sizeof(struct ms_context); }
 
 size_t ms_context_alignment(void) { return _Alignof(struct ms_context); }
 
-/* Register-level primitives (ms_context_aarch64.S). mjs__ctx_make_raw is
+/* Register-level primitives (ms_context_aarch64.S, or
+ * ms_context_x86_64.S on x86-64 hosts — #72). mjs__ctx_make_raw is
  * dylib-private (private_extern): reachable only through
  * ms_context_init, after validation below. */
 extern void mjs__ctx_make_raw(ms_context *ctx, void *stack_top,
@@ -93,12 +108,14 @@ int ms_context_init(ms_context *ctx, void *stack_low, size_t stack_size,
      * stack_low must be 16-aligned too: with a 16-multiple size this
      * makes stack_top aligned, so misalignment traps in mjs__ctx_make_raw
      * instead of returning -EINVAL from the only int-returning API here.
-     * KNOWN GAP (panel Systems finding, pre-#66): an adversarial
-     * stack_low near SIZE_MAX can wrap stack_top to a wild low address;
-     * callers pass real allocations (mjs_stack_alloc), so no overflow
-     * check is attempted here. */
+     * Overflow guard (#70, S5.7 panel mandate): an adversarial stack_low
+     * near SIZE_MAX can make stack_top = stack_low + stack_size fold to a
+     * wild low address. Reject that on the same -EINVAL path as the other
+     * geometry violations, with ctx untouched, so mjs__ctx_make_raw never
+     * sees a wrapped stack_top. */
     if (stack_size == 0 || (stack_size & 15u) != 0 ||
-        (((uintptr_t)stack_low) & 15u) != 0)
+        (((uintptr_t)stack_low) & 15u) != 0 ||
+        (uintptr_t)stack_low > UINTPTR_MAX - stack_size)
         return -EINVAL;
     mjs__ctx_make_raw(ctx, (unsigned char *)stack_low + stack_size, entry,
                       userdata);
