@@ -38,7 +38,7 @@ LIB_OBJS     := $(filter-out $(BUILD)/selftest.o,$(OBJS))
 SELFTEST_BIN := $(BUILD)/selftest
 
 .DELETE_ON_ERROR:
-.PHONY: all selftest test bench test-s1 test-s2 test-s2-conformance \
+.PHONY: test-s6 all selftest test bench test-s1 test-s2 test-s2-conformance \
         test-s2-stress test-s2-integration test-s2-pkg test-s3 test-s5 bench-io clean
 
 all: $(DYLIB) $(SELFTEST_BIN) $(DYLIB_SYS)
@@ -101,6 +101,22 @@ test-s3: $(DYLIB_SYS)
 
 test-s5: $(DYLIB_SYS)
 	MOJO=$(MOJO) ./tests/s5/run.sh
+
+# S6 I/O conformance lanes (mojito-async#141 item 5: these existed with no
+# Makefile target at all, so the I/O layer was inside no gate).  Each lane
+# exits 2 on a host where its backend is the -ENOSYS stub, and 2 is an
+# ENVIRONMENT result the gate must not treat as a pass — which is exactly why
+# this target is NOT in precommit/gate.sh's check list: on a macOS dev host it
+# would block every commit on a platform condition rather than a defect.  It
+# belongs in the Linux CI lane from mojito-async#141.
+test-s6: $(DYLIB_SYS)
+	@rc=0; \
+	for lane in ./tests/s6/*/run.sh; do \
+	    [ -x "$$lane" ] || continue; \
+	    printf '== %s\n' "$$lane"; \
+	    MOJO=$(MOJO) CC=$(CC) "$$lane" || rc=$$?; \
+	done; \
+	exit $$rc
 
 -include $(SYS_DEPS)
 clean:
