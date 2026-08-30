@@ -6,10 +6,12 @@ name: ci
 # claim independently of the author's own laptop — the same finding
 # mojito-async/mojito-async#141 fixed for mojito-async, ported here.
 #
-# Three lanes, mirroring mojito-async's ci.yml:
-#   gate-selftest  the gate's own test, no toolchain, runs everywhere
-#   suite-macos    the real suite on this repo's primary dev host — blocking
-#   suite-linux    reported, not blocking (see below)
+# Four lanes, mirroring mojito-async's ci.yml:
+#   gate-selftest   the gate's own test, no toolchain, runs everywhere
+#   suite-macos     the real suite on this repo's primary dev host — blocking
+#   suite-linux     reported, not blocking (see below)
+#   suite-s6-linux  the S6 I/O lanes on a real Linux kernel — reported, not
+#                   blocking (issue #174)
 #
 # suite-linux: the canonical native/posix/ms_context_{aarch64,x86_64}.S
 # support both Darwin Mach-O and Linux ELF (that dual-ABI support is the
@@ -21,6 +23,20 @@ name: ci
 # suites that could otherwise run there. Fixing that split is its own
 # piece of work, not this one; the lane stays non-blocking and honest about
 # where it stops, the same way mojito-async's own suite-linux lane does.
+#
+# suite-s6-linux (issue #174): the S6 I/O lanes (epoll, io_uring) are the
+# one battery that does NOT hit the wall above, because
+# tests/docker/run-linux-lanes.sh never runs the top-level `make` — it
+# compiles only native/**/*.c directly (the piece the S0 spike wall never
+# touches) inside a native-arch container it builds and runs itself, so it
+# gives these lanes a real Linux kernel today without waiting on the
+# suite-linux fix. On macOS these lanes only ever report ENVIRONMENT (no
+# epoll/io_uring backend to exercise), so this is their only real signal;
+# it already caught a live defect the moment it was run for real (issue
+# #181: a missing FD_CLOEXEC on sockets mjs_socket_open/mjs_socket_accept
+# create — filed separately, not this issue's job to fix). Reported, not
+# blocking, same as suite-linux, until that defect and any others it finds
+# are cleared.
 
 on:
   push:
@@ -104,3 +120,19 @@ jobs:
           MOJITO_GATE_REQUIRE_ISSUE_CHECK: "1"
           MOJITO_GATE_TIER: full
         run: ./precommit/gate.sh
+
+  suite-s6-linux:
+    name: S6 I/O lanes (Linux, native arch, issue #174) — reported, not blocking
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: tests/docker/run-linux-lanes.sh
+        env:
+          # ubuntu-latest's Docker ships a default seccomp profile that
+          # blocks io_uring_setup outright; relax it so a lane that reports
+          # UNSUPPORTED-PLATFORM here is reporting the runner's actual
+          # kernel capability, not Docker's default policy.
+          SECCOMP: unconfined
+        run: ./tests/docker/run-linux-lanes.sh

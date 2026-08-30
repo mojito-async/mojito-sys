@@ -111,7 +111,8 @@ gcc -shared -o libmojito_sys.so build/sys/*.o 2>/dev/null || exit 2
 echo "linux lanes: libmojito_sys.so built ($(nm -D libmojito_sys.so | grep -cE ' T (mjs|ms)_') exported symbols)"
 echo ""
 
-rc=0
+saw_red=0
+saw_env=0
 ran=0
 for lane in tests/s6/*/run.sh; do
     [ -x "$lane" ] || continue
@@ -119,12 +120,27 @@ for lane in tests/s6/*/run.sh; do
     if [ -n "$LANE" ] && [ "$LANE" != "$name" ]; then continue; fi
     ran=$((ran + 1))
     printf '== %s\n' "$name"
-    CC=gcc "$lane" || rc=$?
+    st=0
+    CC=gcc "$lane" || st=$?
+    # A RED lane must win the aggregate over a later ENV one: rc=$? alone
+    # (last write wins) let a real defect get silently overwritten by a
+    # subsequent lane's ENVIRONMENT exit, which is exactly the "I could not
+    # measure read as nothing wrong" failure mode mojito-async#141 targets.
+    if [ "$st" -eq 1 ]; then
+        saw_red=1
+    elif [ "$st" -ne 0 ]; then
+        saw_env=1
+    fi
     echo ""
 done
 if [ "$ran" -eq 0 ]; then
     echo "run-linux-lanes.sh: no lane matched"
     exit 2
 fi
-exit "$rc"
+if [ "$saw_red" -eq 1 ]; then
+    exit 1
+elif [ "$saw_env" -eq 1 ]; then
+    exit 2
+fi
+exit 0
 INNER
