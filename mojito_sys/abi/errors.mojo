@@ -229,14 +229,34 @@ struct SysError(ImplicitlyCopyable):
 
     # Absorbs the frozen contract's return-code sign convention, used by
     # mojito-sys C-ABI helpers:
-    #   rc == 0            success (code 0,
-    #   rc < 0             error, |rc| is the POSIX errno,
-    #   rc > 0             positive informational value (kept as a positive
-    #                      POSIX code; not itself a failure).
+    #   rc == 0   success. POSIX domain, code 0, and `ok()` is True.
+    #   rc < 0    failure. POSIX domain, |rc| is the errno.
+    #   rc > 0    CONTRACT VIOLATION. INTERNAL domain, code rc, `ok()` False.
+    #
+    # The third case cannot legally happen. native/include/mojito_sys.h:29
+    # freezes every public entry point at "0 == success; negative == -errno",
+    # so a positive rc is only ever produced by a BUG IN THE NATIVE LAYER,
+    # which is exactly when a caller most needs to be told the truth.
+    #
+    # This used to return SysError(POSIX, rc) there, with a docstring calling
+    # rc > 0 "a positive informational value ... not itself a failure" while
+    # `ok()` (two lines below) reported it as a failure. So `+1` came back as
+    # an ordinary permission error rendering as "POSIX errno 1 ()" — code 1
+    # is in neither name table, hence the empty parentheses. The magnitude of
+    # an informational value became the identity of a fabricated error,
+    # wearing a domain it never came from and pointing at the wrong
+    # subsystem. That is how mojito-sys#167 reached users. See #170.
+    #
+    # INTERNAL rather than API, on this file's own semantics: INTERNAL is for
+    # "invariants and 'cannot happen' failures", API is for caller misuse.
+    # The caller did nothing wrong; our native layer broke a contract it
+    # declares in its own header.
     @staticmethod
     def from_rc(rc: Int32) -> SysError:
         if rc < 0:
             return SysError(ErrorDomain.POSIX, -rc)
+        if rc > 0:
+            return SysError(ErrorDomain.INTERNAL, rc)
         return SysError(ErrorDomain.POSIX, rc)
 
     # True iff the code is 0 — which means "no failure" in every domain.
@@ -271,13 +291,56 @@ struct SysError(ImplicitlyCopyable):
 # that also lowers @extern bindings — so consumers on mjs_* ABIs must raise
 # through THIS function instead of hand-rolling `raise Error(err.to_string())`
 # (issue #29, panel H6).
+# The differing words come from these two NON-RAISING helpers, exactly the
+# way errno_name/domain_name already feed this message. raise_errno's own
+# body keeps the shape it has always had: one straight-line concatenation and
+# one raise, with no branch anywhere in the raising function.
+#
+# WHY THIS SHAPE, MEASURED (#170). I tried four ways to give rc > 0 its own
+# text and ran each against tests/s1/memory/vm, the #29 reproducer:
+#
+#   A  branch inside raise_errno assigning one of two String LITERALS to
+#      `msg`, then one raise                                        -> passes
+#   B  two separate straight-line raise helpers, sign branched at the
+#      call site                                        -> CRASHES the compiler
+#   C  this one: branch lives in non-raising String helpers          -> passes
+#   D  as C, but the words Int-packed like the name tables           -> passes
+#
+# B is the shape the note above most obviously endorses and it is the ONE
+# that breaks, with a mojo stack dump through _sigtramp while lowering
+# virtual_memory.mojo. So the trigger here is an extra RAISING frame in the
+# chain, not a literal crossing a merge: A, the shape the note forbids, is
+# fine. I kept C anyway rather than A, because it leaves the raising function
+# byte-for-byte the shape that has always worked and puts the branch in
+# ordinary non-raising helpers, which is what errno_name has done all along.
+#
+# tests/s1/abi/errors RAISES AND CATCHES both signs rather than merely
+# compiling them, so a regression shows up as a failing lane instead of as a
+# crash in somebody's production error handler.
+def _rc_kind(rc: Int32) -> String:
+    if rc > 0:
+        return "contract violation, native rc +"
+    return "POSIX errno "
+
+
+def _rc_detail(rc: Int32, err: SysError) -> String:
+    if rc > 0:
+        return (
+            domain_name(err.domain.value)
+            + "; the frozen ABI is 0 == success and negative == -errno, so a"
+            + " positive rc is a bug in the native layer, never an errno"
+        )
+    return errno_name(err.code)
+
+
 def raise_errno(rc: Int32) raises:
     var err = SysError.from_rc(rc)
     var msg = (
-        "mojito-sys error: POSIX errno "
+        "mojito-sys error: "
+        + _rc_kind(rc)
         + String(err.code)
         + " ("
-        + errno_name(err.code)
+        + _rc_detail(rc, err)
         + ")"
     )
     raise Error(msg)

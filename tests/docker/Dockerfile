@@ -10,6 +10,11 @@
 # Deliberately minimal: the S6 lanes are pure C against native/include, so a
 # C toolchain and Linux kernel headers are the whole requirement.  No Mojo
 # here — the Mojo suites are a separate concern.
+#
+# The image MUST be built and run for the host's NATIVE architecture.
+# run-linux-lanes.sh passes --platform and then verifies the arch from
+# inside; see the long note there for why an emulated image is worse than no
+# image at all.
 FROM gcc:13-bookworm
 
 # strace is not used by the lanes; it is here because the first thing anyone
