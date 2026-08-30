@@ -31,3 +31,14 @@ tests/s6/*/*/.build/
 benchmark/*/.build/
 benchmark/*/*.log
 spike/completion/.build/
+
+# Belt-and-suspenders for precommit/test-gate.sh's throwaway sandbox repo
+# (issue mojito-async/mojito-async#169). Root cause found and fixed
+# (precommit/test-gate.sh now unsets GIT_DIR/GIT_INDEX_FILE/etc before
+# creating any sandbox, since those variables -- inherited from a real
+# hook invocation -- silently redirected the sandbox's `git add`/`git
+# config --local` into THIS repo's index and shared config regardless of
+# `git -C`). Kept anyway as cheap insurance: a bare `git add probe.txt`/
+# `git add "$sb/probe.txt"` cannot stage an ignored path here without -f,
+# which nothing in this tree ever passes.
+/probe.txt

@@ -333,18 +333,30 @@ if [ "$failures" -ne 0 ]; then
 fi
 
 # ---- issue #67 additions -------------------------------------------------
-echo ""
-echo "== s5_ctx_api rows (issue #67)"
-arows=""
 # Pure-Mojo NativeContext API (mojito_sys/ctx) over the frozen ms_context_*
 # ABI. Current row scope on b2: create/capture/destroy/state geometry,
 # misaligned-creation rejection, double-destroy raising, finish-hook
 # registration, re-capture revival. The REAL-switch rows (A->B bounce,
-# exactly-once finish hook, FINISHED/RUNNING misuse on switch) are deferred:
-# mojo 1.0.0b2 crashes lowering the raising-extern wrapper (upstream
-# modular/modular #7004), so switch semantics are proven at the C level by
-# the sentinel/lifecycle lanes and will return to this lane when the
-# toolchain can lower it.
+# exactly-once finish hook, FINISHED/RUNNING misuse on switch) are deferred
+# pending #173: the api lane's @export'd C entry trampolines never
+# materialize under `mojo run` or `mojo build` (a different, later-stage
+# failure than the raising-extern lowering crash #67/modular/modular#7004
+# originally tracked — that crash no longer reproduces; see #173 for the
+# current failure and root-cause hypothesis), so switch semantics stay
+# proven at the C level by the sentinel/lifecycle lanes until #173 closes.
+#
+# MOJITO_SKIP_S5_CTX_API=1 (precommit/run-suite.sh, issue mojito-async/
+# mojito-async#169) skips this lane entirely so the gate can score it as
+# its own driver (`s5-ctx-api`) instead of folding it into the S5 ctx
+# aggregate — a known-red row can then name exactly this lane, precisely
+# scoped to #173, without shielding anything else in S5.
+if [ "${MOJITO_SKIP_S5_CTX_API:-0}" = "1" ]; then
+    echo ""
+    echo "== s5_ctx_api rows (issue #67 / #173) — SKIPPED (MOJITO_SKIP_S5_CTX_API=1)"
+else
+echo ""
+echo "== s5_ctx_api rows (issue #67 / #173)"
+arows=""
 out=$(sh "$SCRIPT_DIR/api/run.sh" 2>&1)
 st=$?
 printf '%s\n' "$out" | sed 's/^/   | /'
@@ -360,6 +372,7 @@ fi
 echo ""
 echo "S5 ctx issue-#67 matrix"
 echo "$arows" | sed 's/^/  /'
+fi
 if [ "$failures" -ne 0 ]; then
     echo "RESULT: $failures FAILED"
     exit 1
