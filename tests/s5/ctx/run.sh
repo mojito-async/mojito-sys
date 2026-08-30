@@ -331,5 +331,38 @@ if [ "$failures" -ne 0 ]; then
     echo "RESULT: $failures FAILED"
     exit 1
 fi
+
+# ---- issue #67 additions -------------------------------------------------
+echo ""
+echo "== s5_ctx_api rows (issue #67)"
+arows=""
+# Pure-Mojo NativeContext API (mojito_sys/ctx) over the frozen ms_context_*
+# ABI. Current row scope on b2: create/capture/destroy/state geometry,
+# misaligned-creation rejection, double-destroy raising, finish-hook
+# registration, re-capture revival. The REAL-switch rows (A->B bounce,
+# exactly-once finish hook, FINISHED/RUNNING misuse on switch) are deferred:
+# mojo 1.0.0b2 crashes lowering the raising-extern wrapper (upstream
+# modular/modular #7004), so switch semantics are proven at the C level by
+# the sentinel/lifecycle lanes and will return to this lane when the
+# toolchain can lower it.
+out=$(sh "$SCRIPT_DIR/api/run.sh" 2>&1)
+st=$?
+printf '%s\n' "$out" | sed 's/^/   | /'
+if [ $st -eq 0 ] && printf '%s' "$out" | grep -q "RESULT: all green"; then
+    arows="$arows api-mojo PASS
+"
+else
+    arows="$arows api-mojo FAIL
+"
+    failures=$((failures + 1))
+fi
+
+echo ""
+echo "S5 ctx issue-#67 matrix"
+echo "$arows" | sed 's/^/  /'
+if [ "$failures" -ne 0 ]; then
+    echo "RESULT: $failures FAILED"
+    exit 1
+fi
 echo "RESULT: all green"
 exit 0
