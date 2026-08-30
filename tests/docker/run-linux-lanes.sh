@@ -69,10 +69,19 @@ fi
 sec=""
 [ -n "${SECCOMP:-}" ] && sec="--security-opt seccomp=$SECCOMP"
 
+# MOJITO_IO_URING=1: iouring_submit and iouring_unmap already set this
+# themselves (setenv, right in the driver) so the flag can never be the
+# reason either quietly skips; tests/s6/iouring's own driver (issue #163)
+# does not and instead documents needing it from the caller, so without
+# this it always reports ENVIRONMENT here too, even on a kernel that could
+# actually run it -- the two self-setting lanes prove the container is
+# capable. Ambient here is a no-op for those two and lets the third one
+# exercise its real success path as well.
 # shellcheck disable=SC2086
 "$DOCKER" run --rm -i --platform "$PLATFORM" $sec \
     -e "LANE=$LANE" \
     -e "WANT_MACHINE=$WANT_MACHINE" \
+    -e "MOJITO_IO_URING=1" \
     -v "$REPO_ROOT":/src:ro "$IMAGE" bash -s <<'INNER'
 set -u
 
@@ -111,7 +120,8 @@ gcc -shared -o libmojito_sys.so build/sys/*.o 2>/dev/null || exit 2
 echo "linux lanes: libmojito_sys.so built ($(nm -D libmojito_sys.so | grep -cE ' T (mjs|ms)_') exported symbols)"
 echo ""
 
-rc=0
+saw_red=0
+saw_env=0
 ran=0
 for lane in tests/s6/*/run.sh; do
     [ -x "$lane" ] || continue
@@ -119,12 +129,32 @@ for lane in tests/s6/*/run.sh; do
     if [ -n "$LANE" ] && [ "$LANE" != "$name" ]; then continue; fi
     ran=$((ran + 1))
     printf '== %s\n' "$name"
-    CC=gcc "$lane" || rc=$?
+    st=0
+    CC=gcc "$lane" || st=$?
+    # A RED lane must win the aggregate over a later ENV one: rc=$? alone
+    # (last write wins) let a real defect get silently overwritten by a
+    # subsequent lane's ENVIRONMENT exit, which is exactly the "I could not
+    # measure read as nothing wrong" failure mode mojito-async#141 targets.
+    # Only exit 2 is the documented ENVIRONMENT contract every S6 lane
+    # follows (see each lane's own "Exit: 0 all green, 1 RED, 2
+    # environment" header); anything else nonzero -- 1, or an off-contract
+    # code from a crash or a missing executable -- counts as RED, not ENV,
+    # so a lane that segfaults can never report as merely "environment".
+    if [ "$st" -eq 2 ]; then
+        saw_env=1
+    elif [ "$st" -ne 0 ]; then
+        saw_red=1
+    fi
     echo ""
 done
 if [ "$ran" -eq 0 ]; then
     echo "run-linux-lanes.sh: no lane matched"
     exit 2
 fi
-exit "$rc"
+if [ "$saw_red" -eq 1 ]; then
+    exit 1
+elif [ "$saw_env" -eq 1 ]; then
+    exit 2
+fi
+exit 0
 INNER

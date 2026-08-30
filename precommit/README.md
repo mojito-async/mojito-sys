@@ -12,7 +12,7 @@ Every commit in this repo runs `precommit/gate.sh` locally:
   siblings, `s3-atomic-wait` / `s3-other` (S3 split so the atomic_wait
   lane's own known-red row can't shield the rest of S3), `s5-ctx-api` /
   `s5-other` (S5 split so the api lane's own known-red row can't shield
-  the rest of S5), `no-markers`. A failing driver blocks the
+  the rest of S5), `s6-tests`, `no-markers`. A failing driver blocks the
   commit UNLESS it is allow-listed as intentional TDD-red in
   `precommit/known-red.tsv` (with tracking issue); the row must be removed
   when the driver goes green.

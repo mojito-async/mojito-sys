@@ -113,21 +113,20 @@ test-s5: $(DYLIB_SYS)
 test-contract-sweep: $(DYLIB_SYS)
 	@CC=$(CC) ./tests/contract_sweep/run.sh
 
-# S6 I/O conformance lanes (mojito-async#141 item 5: these existed with no
-# Makefile target at all, so the I/O layer was inside no gate).  Each lane
-# exits 2 on a host where its backend is the -ENOSYS stub, and 2 is an
-# ENVIRONMENT result the gate must not treat as a pass — which is exactly why
-# this target is NOT in precommit/gate.sh's check list: on a macOS dev host it
-# would block every commit on a platform condition rather than a defect.  It
-# belongs in the Linux CI lane from mojito-async#141.
+# S6 I/O conformance lanes (mojito-async#141 item 5 / issue #174: these
+# existed with no Makefile target, no aggregator and no gate row at all, so
+# the I/O layer was inside no gate). tests/s6/run.sh discovers every lane at
+# either depth (tests/s6/<lane>/run.sh and tests/s6/io/<lane>/run.sh) and
+# scores each one PASS/ENV/FAIL: a lane that exits 2 because its backend is
+# the -ENOSYS stub on this host is an ENVIRONMENT result, not a pass and not
+# a failure, and does not fail the aggregate — see that script's header.
+# That is what lets this target sit in precommit/run-suite.sh's `full` and
+# `affected` tiers (issue #174) without blocking every commit on a macOS dev
+# host purely on a platform condition. The real Linux signal for these
+# lanes comes from tests/docker/run-linux-lanes.sh, wired into CI as the
+# separate, reported (non-blocking) suite-s6-linux job.
 test-s6: $(DYLIB_SYS)
-	@rc=0; \
-	for lane in ./tests/s6/*/run.sh; do \
-	    [ -x "$$lane" ] || continue; \
-	    printf '== %s\n' "$$lane"; \
-	    MOJO=$(MOJO) CC=$(CC) "$$lane" || rc=$$?; \
-	done; \
-	exit $$rc
+	MOJO=$(MOJO) CC=$(CC) ./tests/s6/run.sh
 
 -include $(SYS_DEPS)
 clean:

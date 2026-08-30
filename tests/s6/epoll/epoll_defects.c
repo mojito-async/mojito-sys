@@ -272,14 +272,15 @@ static void case_sub_ms_timeout(void)
 
 static void case_cloexec(void)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        fail("cloexec: socket() failed");
+    /* Goes through the real mjs_socket_socket entry point (issue #181),
+     * not a bare socket() of our own -- a raw call here would check
+     * fcntl's own default rather than what the library under test
+     * actually does, and could never observe a fix to it either. */
+    int fd = -1;
+    if (mjs_socket_socket(MJS_SOCK_INET, MJS_SOCK_STREAM, &fd) != 0) {
+        fail("cloexec: mjs_socket_socket failed");
         return;
     }
-    /* mjs_socket.c:144 uses socket(af, type, 0) with no SOCK_CLOEXEC and no
-     * fcntl(FD_CLOEXEC) anywhere; :223 uses a plain accept rather than
-     * accept4. The flag is what a child would or would not inherit. */
     int flags = fcntl(fd, F_GETFD);
     if (flags < 0) {
         fail("cloexec: fcntl(F_GETFD) failed");
