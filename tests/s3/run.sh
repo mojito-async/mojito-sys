@@ -17,6 +17,15 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # sorted for stability.
 lanes=$(CDPATH= cd -- "$SCRIPT_DIR" && find . -mindepth 3 -maxdepth 3 -name run.sh | sort)
 
+# MOJITO_SKIP_S3_ATOMIC_WAIT=1 (precommit/run-suite.sh) excludes the
+# sync/atomic_wait lane from this aggregate, mirroring the
+# MOJITO_SKIP_S5_CTX_API split from issue mojito-async/mojito-async#169:
+# it lets the gate score atomic_wait as its own driver (`s3-atomic-wait`)
+# instead of folding it into the rest of S3 (`s3-other`) — issue #176.
+if [ "${MOJITO_SKIP_S3_ATOMIC_WAIT:-0}" = "1" ]; then
+    lanes=$(printf '%s\n' "$lanes" | grep -v '^\./sync/atomic_wait/run\.sh$')
+fi
+
 failures=0
 matrix=""
 for lane_sh in $lanes; do

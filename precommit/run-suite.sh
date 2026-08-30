@@ -119,7 +119,11 @@ if [ "$TIER" = "affected" ]; then
         run_driver s2-integration   make test-s2-integration
         run_driver s2-pkg           make test-s2-pkg
     fi
-    touches "tests/s3/" && run_driver s3-tests make test-s3
+    touches "tests/s3/sync/atomic_wait/" && run_driver s3-atomic-wait ./tests/s3/sync/atomic_wait/run.sh
+    # Any other S3 path (mutex, condvar, semaphore, event, integration,
+    # ...) reruns the whole s3-other battery rather than trying to scope
+    # further — same call S5 makes for its own non-api lanes.
+    touches "tests/s3/" && run_driver s3-other env MOJITO_SKIP_S3_ATOMIC_WAIT=1 MOJO="$MOJO" ./tests/s3/run.sh
     touches "tests/s5/ctx/api/" && run_driver s5-ctx-api ./tests/s5/ctx/api/run.sh
     # Any other S5 path (ctx/sentinel, ctx/lifecycle, x86, ...) reruns the
     # whole s5-other battery rather than trying to scope further — S5's own
@@ -138,7 +142,14 @@ run_driver s2-conformance   make test-s2-conformance
 run_driver s2-stress        make test-s2-stress
 run_driver s2-integration   make test-s2-integration
 run_driver s2-pkg           make test-s2-pkg
-run_driver s3-tests         make test-s3
+# S3 is split into two drivers (issue #176, mirroring S5's split below)
+# instead of one `s3-tests` row: `s3-atomic-wait` is the lane that was
+# genuinely flaky (fixed by #176, but kept as its own driver so a future
+# regression there can't hide behind the rest of S3 again); `s3-other` is
+# everything else in S3 (mutex, condvar, semaphore, event, integration)
+# and must stay green on its own.
+run_driver s3-atomic-wait   ./tests/s3/sync/atomic_wait/run.sh
+run_driver s3-other         env MOJITO_SKIP_S3_ATOMIC_WAIT=1 MOJO="$MOJO" ./tests/s3/run.sh
 # S5 is split into two drivers (issue #169) instead of one `s5-tests` row:
 # `s5-ctx-api` is the one lane that's genuinely red today (tracked by
 # mojito-sys#173); `s5-other` is everything else in S5 (ctx sentinel,
