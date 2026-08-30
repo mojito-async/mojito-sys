@@ -98,6 +98,7 @@ test-s2-pkg: $(DYLIB_SYS)
 	MOJO=$(MOJO) ./tests/s2/pkg/run.sh
 
 test-s3: $(DYLIB_SYS)
+	MOJO=$(MOJO) ./tests/s3/run.sh
 
 test-s5: $(DYLIB_SYS)
 	MOJO=$(MOJO) ./tests/s5/run.sh

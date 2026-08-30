@@ -1,0 +1,106 @@
+name: ci
+
+# Issue mojito-async/mojito-async#169. Until this file existed mojito-sys had
+# ZERO GitHub Actions workflows (`gh api .../actions/workflows` returned
+# total_count 0) and no branch protection, so nothing ever verified a green
+# claim independently of the author's own laptop — the same finding
+# mojito-async/mojito-async#141 fixed for mojito-async, ported here.
+#
+# Three lanes, mirroring mojito-async's ci.yml:
+#   gate-selftest  the gate's own test, no toolchain, runs everywhere
+#   suite-macos    the real suite on this repo's primary dev host — blocking
+#   suite-linux    reported, not blocking (see below)
+#
+# suite-linux: the canonical native/posix/ms_context_{aarch64,x86_64}.S
+# support both Darwin Mach-O and Linux ELF (that dual-ABI support is the
+# whole point of mojito-sys#164/#174's vendor-drift finding on the
+# mojito-async side), but the S0 spike lane
+# (spike/context_switch/aarch64_switch.S) that `make` also builds is still
+# Apple-arm64-only (`#error "aarch64_switch.S targets Apple arm64 (Mach-O)
+# only"`), so a plain `make` fails early on Linux before reaching the S1+
+# suites that could otherwise run there. Fixing that split is its own
+# piece of work, not this one; the lane stays non-blocking and honest about
+# where it stops, the same way mojito-async's own suite-linux lane does.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate-selftest:
+    name: gate self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: precommit/test-gate.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # On CI an unverifiable tracking issue is a failure, not a note:
+          # the whole point of the row check is that it cannot be skipped.
+          MOJITO_GATE_REQUIRE_ISSUE_CHECK: "1"
+        run: ./precommit/test-gate.sh
+
+  suite-macos:
+    name: suite (macOS arm64)
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache Mojo toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/mojo-toolchain
+          key: mojo-toolchain-${{ runner.os }}-${{ hashFiles('.github/scripts/install-mojo.sh') }}
+      - name: Install Mojo toolchain
+        run: ./.github/scripts/install-mojo.sh
+      - name: Cache build/ (native + spike objects)
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: mojito-sys-build-${{ runner.os }}-${{ hashFiles('Makefile', 'native/**', 'spike/context_switch/**') }}
+      - name: Build
+        run: make
+      - name: Full suite through the pre-commit gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MOJITO_GATE_REQUIRE_ISSUE_CHECK: "1"
+          # CI never has anything staged (a checkout, not a commit-in-
+          # progress), so the tiered hook's diff-based tier selection would
+          # already default to "full" here — set it explicitly so the
+          # workflow's intent doesn't depend on that fallback.
+          MOJITO_GATE_TIER: full
+        run: ./precommit/gate.sh
+
+  suite-linux:
+    name: suite (Linux x86-64) — reported, not blocking
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - name: Container prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential ca-certificates curl unzip zstd
+      - uses: actions/checkout@v4
+      - name: Install Mojo toolchain
+        run: ./.github/scripts/install-mojo.sh
+      - name: Build
+        run: make
+      - name: Full suite through the pre-commit gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MOJITO_GATE_REQUIRE_ISSUE_CHECK: "1"
+          MOJITO_GATE_TIER: full
+        run: ./precommit/gate.sh
