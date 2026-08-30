@@ -69,10 +69,19 @@ fi
 sec=""
 [ -n "${SECCOMP:-}" ] && sec="--security-opt seccomp=$SECCOMP"
 
+# MOJITO_IO_URING=1: iouring_submit and iouring_unmap already set this
+# themselves (setenv, right in the driver) so the flag can never be the
+# reason either quietly skips; tests/s6/iouring's own driver (issue #163)
+# does not and instead documents needing it from the caller, so without
+# this it always reports ENVIRONMENT here too, even on a kernel that could
+# actually run it -- the two self-setting lanes prove the container is
+# capable. Ambient here is a no-op for those two and lets the third one
+# exercise its real success path as well.
 # shellcheck disable=SC2086
 "$DOCKER" run --rm -i --platform "$PLATFORM" $sec \
     -e "LANE=$LANE" \
     -e "WANT_MACHINE=$WANT_MACHINE" \
+    -e "MOJITO_IO_URING=1" \
     -v "$REPO_ROOT":/src:ro "$IMAGE" bash -s <<'INNER'
 set -u
 
