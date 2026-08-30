@@ -65,6 +65,11 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+/* Two descriptor numbers congruent mod MJS_EPOLL_TABLE_CAP (256), so they
+ * hash to the same home slot and B is probed one past A. */
+#define A_FD 300
+#define B_FD 556
+
 static int failures;
 
 static void fail(const char *what)
@@ -87,7 +92,8 @@ static void case_full_table(void)
 {
     mjs_epoller *p = NULL;
     int fds[600];
-    int n = 0, i, rc;
+    volatile int n = 0;   /* live across siglongjmp */
+    int i, rc;
     struct sigaction sa, old;
 
     if (mjs_epoll_create(&p) != 0) {
@@ -164,11 +170,22 @@ static void case_deleted_chain(void)
         return;
     }
 
-    /* The two read ends need not collide in the table for the DELETE to be
-     * wrong, but a collision is what makes the drop observable. The hash is
-     * fd * 2654435761 masked to 8 bits, so descriptors 256 apart collide;
-     * with an arbitrary pair we simply register A first and B second and
-     * check B survives A's removal, which is the property regardless. */
+    /* The collision has to be FORCED, or the case proves nothing. The hash
+     * is fd * 2654435761 masked to 8 bits; 2654435761 is odd, so that map is
+     * a bijection mod 256 and two descriptors collide exactly when they are
+     * congruent mod 256. dup2 puts them at chosen numbers 256 apart, so A
+     * lands in the home slot and B is probed one past it.
+     *
+     * (My first version registered two arbitrary descriptors and the case
+     * passed on Linux: they simply did not collide, so there was no chain to
+     * break. A test that cannot fail is worse than no test.) */
+    if (dup2(a[0], A_FD) < 0 || dup2(b[0], B_FD) < 0) {
+        fail("deleted-chain: dup2 could not place the colliding descriptors");
+        goto done;
+    }
+    close(a[0]); a[0] = A_FD;
+    close(b[0]); b[0] = B_FD;
+
     if (mjs_epoll_register(p, a[0], MJS_POLL_READABLE, 0xAAu) != 0 ||
         mjs_epoll_register(p, b[0], MJS_POLL_READABLE, 0xBBu) != 0) {
         fail("deleted-chain: registration failed");
