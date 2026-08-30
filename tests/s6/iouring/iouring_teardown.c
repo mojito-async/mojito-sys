@@ -58,6 +58,7 @@
 #define CYCLES 16
 
 static int failures;
+static int ring_creatable;   /* set by case_create_contract */
 
 static void fail(const char *what)
 {
@@ -107,6 +108,63 @@ static int still_mapped(void *addr, size_t len)
     }
     fclose(f);
     return found;
+}
+
+/* ---- case 0: create must honour the file's own return contract --------
+ *
+ * FOUND BY RUNNING IT.  Every entry point in this file documents "0 ==
+ * success, negative == -errno", and EPIC mojito-async#140 singles that
+ * contract out as something the project got right across ~60 C entry
+ * points.  mjs_iouring_create breaks it, and not subtly:
+ *
+ *   ioring_enter()            returns (int)r, the NUMBER OF SQES CONSUMED
+ *   uring_submit()            returns that straight through
+ *   uring_submit_poll_add()   `return uring_submit(u, 0, 0);`
+ *   mjs_iouring_create()      `rc = uring_submit_poll_add(...);
+ *                              if (rc != 0) { ...tear everything down...
+ *                                             return rc; }`
+ *
+ * The wake poll stages exactly one SQE, so io_uring_enter reports 1, create
+ * reads 1 as a failure, destroys the ring it has just finished building,
+ * and returns +1 — a positive value that is not 0 and not -errno, so a
+ * caller cannot even decode it.
+ *
+ * On a kernel that actually supports io_uring this means a ring can NEVER
+ * be created.  It is also why the two teardown cases below cannot run:
+ * there is no live ring to close.
+ */
+
+static void case_create_contract(void)
+{
+    mjs_uring *u = NULL;
+    int rc = mjs_iouring_create(&u);
+
+    if (rc == 0) {
+        ring_creatable = 1;
+        mjs_iouring_close(&u);
+        return;
+    }
+
+    if (rc > 0) {
+        char msg[420];
+        snprintf(msg, sizeof msg,
+                 "create-contract: mjs_iouring_create returned %d. Every entry"
+                 " point in this file documents 0 == success, negative =="
+                 " -errno, so a POSITIVE return is undecodable. It is the SQE"
+                 " count from io_uring_enter, propagated through uring_submit"
+                 " and uring_submit_poll_add and then read as an error by"
+                 " create, which tears down the ring it just built. On a"
+                 " kernel with io_uring a ring can never be created at all.",
+                 rc);
+        fail(msg);
+    } else {
+        char msg[256];
+        snprintf(msg, sizeof msg,
+                 "create-contract: mjs_iouring_create returned %d (%s) after"
+                 " mjs_iouring_available() said the backend was usable",
+                 rc, strerror(-rc));
+        fail(msg);
+    }
 }
 
 /* ---- case A: closing a ring must not unmap a neighbour ---------------- */
@@ -206,8 +264,17 @@ int main(void)
         return 2;
     }
 
-    case_guard_survives();
-    case_no_leak();
+    case_create_contract();
+
+    if (!ring_creatable) {
+        printf("  guard/leak: BLOCKED — the two teardown cases need a live"
+               " ring to close, and create cannot produce one (above).\n");
+        printf("  The munmap-geometry defect this lane exists for is"
+               " UNREACHABLE until the create return contract is fixed.\n");
+    } else {
+        case_guard_survives();
+        case_no_leak();
+    }
 
     if (failures == 0) {
         printf("RESULT: all green\n");
