@@ -126,10 +126,15 @@ for lane in tests/s6/*/run.sh; do
     # (last write wins) let a real defect get silently overwritten by a
     # subsequent lane's ENVIRONMENT exit, which is exactly the "I could not
     # measure read as nothing wrong" failure mode mojito-async#141 targets.
-    if [ "$st" -eq 1 ]; then
-        saw_red=1
-    elif [ "$st" -ne 0 ]; then
+    # Only exit 2 is the documented ENVIRONMENT contract every S6 lane
+    # follows (see each lane's own "Exit: 0 all green, 1 RED, 2
+    # environment" header); anything else nonzero -- 1, or an off-contract
+    # code from a crash or a missing executable -- counts as RED, not ENV,
+    # so a lane that segfaults can never report as merely "environment".
+    if [ "$st" -eq 2 ]; then
         saw_env=1
+    elif [ "$st" -ne 0 ]; then
+        saw_red=1
     fi
     echo ""
 done
