@@ -15,12 +15,15 @@
 #     like any other domain (S1.11, mojito-sys #44);
 #   - errno names are host-selected: darwin numbering on darwin, Linux
 #     numbering on Linux, with colliding codes (35, 11) resolved per-host
-#     and unlisted codes falling back to numeric (#44).
+#     and unlisted codes falling back to numeric (#44);
+#   - a POSITIVE rc is a CONTRACT VIOLATION and is labelled as one, not
+#     dressed up as an ordinary POSIX errno (S1.12, mojito-sys #170).
 
 from mojito_sys.abi.errors import (
     ErrorDomain,
     SysError,
     errno_name,
+    raise_errno,
     _errno_name_darwin,
     _errno_name_linux,
 )
@@ -254,8 +257,173 @@ def run_checks() -> Int:
     return failed
 
 
+# --- S1.12 (#170): a positive rc is a contract violation, not an errno ---
+#
+# native/include/mojito_sys.h:29 freezes every public entry point at
+# "0 == success; negative == -errno". A positive rc is therefore impossible
+# by design and is only ever produced by a BUG IN THE NATIVE LAYER, which is
+# exactly when a caller most needs to be told the truth.
+#
+# from_rc used to return SysError(POSIX, rc) for that case, so `+1` rendered
+# as "POSIX(EPERM) errno 1": the magnitude of a value its own docstring
+# called "not itself a failure" became the identity of a fabricated error,
+# stamped with a domain it never came from. That is how sys#167 presented,
+# as a permission error out of a subsystem that had never touched a
+# permission.
+#
+# NOTE ON THE GUARDS: the ~53 `if rc != 0: raise_errno(rc)` guards across the
+# package are NOT the defect and must not be narrowed to `rc < 0`. Under
+# `rc < 0` a positive rc reads as SUCCESS and the caller uses an out-slot the
+# C function never wrote. The defect is the LABEL, not the raising.
+def run_rc_contract_checks() -> Int:
+    var failed = 0
+
+    var pos = SysError.from_rc(1)
+
+    # It must not claim to be POSIX. Nothing about a contract violation is a
+    # POSIX errno, and the magnitude is not an errno code.
+    if not (pos.domain == ErrorDomain.POSIX):
+        print("S1.12 from_rc(+1) is not POSIX:     PASS")
+    else:
+        print("S1.12 from_rc(+1) is not POSIX:     FAIL (renders as "
+              + pos.to_string() + ")")
+        failed += 1
+
+    # INTERNAL is the file's own documented home for this: "internal status
+    # codes ... for invariants and 'cannot happen' failures rather than OS
+    # surfaces". Not API, which is caller-misuse; the caller did nothing
+    # wrong here.
+    if pos.domain == ErrorDomain.INTERNAL:
+        print("S1.12 from_rc(+1) is INTERNAL:      PASS")
+    else:
+        print("S1.12 from_rc(+1) is INTERNAL:      FAIL")
+        failed += 1
+
+    # The rendered text must not name an errno.
+    if not contains(pos.to_string(), "POSIX"):
+        print("S1.12 from_rc(+1) text not POSIX:   PASS")
+    else:
+        print("S1.12 from_rc(+1) text not POSIX:   FAIL (" + pos.to_string()
+              + ")")
+        failed += 1
+
+    # It reports itself as a failure, and now the docstring says so too.
+    if not pos.ok():
+        print("S1.12 from_rc(+1).ok() is False:    PASS")
+    else:
+        print("S1.12 from_rc(+1).ok() is False:    FAIL")
+        failed += 1
+
+    # The magnitude is still carried, so the diagnostic can say WHICH value
+    # escaped.
+    if pos.code == 1 and SysError.from_rc(7).code == 7:
+        print("S1.12 from_rc(+n) keeps n:          PASS")
+    else:
+        print("S1.12 from_rc(+n) keeps n:          FAIL")
+        failed += 1
+
+    # And the two cases that DO exist must not move.
+    var neg = SysError.from_rc(-22)
+    var zero = SysError.from_rc(0)
+    if (
+        neg.domain == ErrorDomain.POSIX
+        and neg.code == 22
+        and zero.ok()
+        and zero.domain == ErrorDomain.POSIX
+    ):
+        print("S1.12 from_rc(<=0) unchanged:       PASS")
+    else:
+        print("S1.12 from_rc(<=0) unchanged:       FAIL")
+        failed += 1
+
+    return failed
+
+
+# The b2 landmine, and why this half of the lane RUNS raise_errno rather than
+# just compiling it.
+#
+# raise_errno's own comment (mojito_sys/abi/errors.mojo) records that its
+# body is deliberately straight-line: b2 SIGSEGVs when a String literal
+# reaches a raise payload through ANY control-flow merge (branch or loop, any
+# module, @always_inline included) while lowering a raising member of a
+# (Movable) struct in a module that also lowers @extern bindings (issue #29).
+#
+# The obvious way to give the positive case its own message is
+# `if rc > 0: msg = "..." else: msg = "..."`, which is EXACTLY that shape. It
+# COMPILES. It then SIGSEGVs at runtime, on the error path, which is the path
+# nobody exercises until production. So a lane that only builds would miss
+# this entirely: both signs have to be raised and caught for real.
+def run_raise_checks() raises -> Int:
+    var failed = 0
+
+    # Negative rc: the path that carries every real error in the package. It
+    # must not move at all.
+    var neg_msg = String("")
+    var neg_raised = False
+    try:
+        raise_errno(-22)
+    except e:
+        neg_raised = True
+        neg_msg = String(e)
+
+    if (
+        neg_raised
+        and contains(neg_msg, "POSIX errno 22")
+        and contains(neg_msg, "EINVAL")
+    ):
+        print("S1.12 raise_errno(-22) unchanged:   PASS")
+    else:
+        print("S1.12 raise_errno(-22) unchanged:   FAIL (" + neg_msg + ")")
+        failed += 1
+
+    # Positive rc: must raise, and must say contract violation rather than
+    # inventing a POSIX errno.
+    var pos_msg = String("")
+    var pos_raised = False
+    try:
+        raise_errno(1)
+    except e:
+        pos_raised = True
+        pos_msg = String(e)
+
+    if pos_raised:
+        print("S1.12 raise_errno(+1) raises:       PASS")
+    else:
+        print("S1.12 raise_errno(+1) raises:       FAIL (did not raise; a"
+              + " positive rc must never read as success)")
+        failed += 1
+
+    if contains(pos_msg, "contract violation"):
+        print("S1.12 raise_errno(+1) says so:      PASS")
+    else:
+        print("S1.12 raise_errno(+1) says so:      FAIL (" + pos_msg + ")")
+        failed += 1
+
+    if not contains(pos_msg, "POSIX"):
+        print("S1.12 raise_errno(+1) not POSIX:    PASS")
+    else:
+        print("S1.12 raise_errno(+1) not POSIX:    FAIL (" + pos_msg
+              + ") — a fabricated errno pointing at the wrong subsystem")
+        failed += 1
+
+    if contains(pos_msg, "1"):
+        print("S1.12 raise_errno(+1) names the rc: PASS")
+    else:
+        print("S1.12 raise_errno(+1) names the rc: FAIL (" + pos_msg + ")")
+        failed += 1
+
+    # Reaching this line at all is the b2 evidence: both raise shapes
+    # lowered and executed without a SIGSEGV.
+    print("S1.12 raise_errno b2 lowering:      PASS (both signs raised and"
+          + " were caught at runtime)")
+
+    return failed
+
+
 def main() raises:
     var failed = run_checks()
+    failed += run_rc_contract_checks()
+    failed += run_raise_checks()
     if failed != 0:
         print("RESULT: " + String(failed) + " FAILED")
         raise Error("S1.3 conformance failed")
