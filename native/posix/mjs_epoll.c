@@ -64,6 +64,10 @@ static const uint64_t MJS_EPOLL_WAKE_VALUE = 1ull;
  * here, so a post-recovery compare to p->wfd discriminates the wake
  * entry. Power of two so `& (CAP - 1)` is a legal wrap mask. */
 #define MJS_EPOLL_TABLE_CAP 256u
+/* Slot states: -1 = empty (probe stops here); MJS_EPOLL_TOMB = deleted
+ * (probe must continue through to avoid breaking displacement chains);
+ * any non-negative value = live fd. */
+#define MJS_EPOLL_TOMB (-2)
 
 struct mjs_epoller {
     int epfd;   /* epoll_create1 fd */
@@ -72,13 +76,27 @@ struct mjs_epoller {
     uint64_t table_tok[MJS_EPOLL_TABLE_CAP];
 };
 
-/* Match-address slot for `fd` (or the first empty slot if absent). */
+/* Return the table slot for `fd`, or the best insertion slot (first tombstone
+ * seen, or the first empty slot if none).  Returns MJS_EPOLL_TABLE_CAP as a
+ * sentinel when the table is entirely full AND `fd` is absent — callers must
+ * treat that as -ENOSPC rather than accessing the table out-of-bounds. */
 static unsigned mjs_epoll_slot(const mjs_epoller *p, int fd)
 {
     unsigned h = (unsigned)(((uint64_t)fd * 2654435761u) &
                             (MJS_EPOLL_TABLE_CAP - 1u));
-    while (p->table_fd[h] != -1 && p->table_fd[h] != fd)
+    unsigned first_tomb = MJS_EPOLL_TABLE_CAP; /* no tombstone seen yet */
+    unsigned count = 0;
+    while (p->table_fd[h] != -1 && p->table_fd[h] != fd) {
+        if (p->table_fd[h] == MJS_EPOLL_TOMB && first_tomb == MJS_EPOLL_TABLE_CAP)
+            first_tomb = h;
         h = (h + 1u) & (MJS_EPOLL_TABLE_CAP - 1u);
+        if (++count >= MJS_EPOLL_TABLE_CAP)
+            return MJS_EPOLL_TABLE_CAP; /* table full, fd absent */
+    }
+    /* h is at an empty (-1) or matching slot; prefer a tombstone for
+     * insertion so deleted holes are recycled before the table fills. */
+    if (p->table_fd[h] == -1 && first_tomb < MJS_EPOLL_TABLE_CAP)
+        return first_tomb;
     return h;
 }
 
@@ -138,7 +156,7 @@ static int mjs_epoll_set(mjs_epoller *p, int fd, uint32_t interests,
         return -EBADF;
 
     slot = mjs_epoll_slot(p, fd);
-    if (p->table_fd[slot] != -1 && p->table_fd[slot] != fd)
+    if (slot >= MJS_EPOLL_TABLE_CAP)
         return -ENOSPC; /* table full */
 
     rc = mjs_epoll_ctl(p, is_add ? EPOLL_CTL_ADD : EPOLL_CTL_MOD,
@@ -218,6 +236,7 @@ int mjs_epoll_modify(mjs_epoller *p, int fd, uint32_t interests,
 
 int mjs_epoll_unregister(mjs_epoller *p, int fd)
 {
+    int rc;
     unsigned slot;
 
     if (p == NULL)
@@ -225,11 +244,13 @@ int mjs_epoll_unregister(mjs_epoller *p, int fd)
     if (fd < 0)
         return -EBADF;
 
+    /* Remove from the kernel first so no further events arrive for this fd
+     * before the table slot is cleared. */
+    rc = mjs_epoll_ctl(p, EPOLL_CTL_DEL, fd, 0);
     slot = mjs_epoll_slot(p, fd);
     if (p->table_fd[slot] == fd)
-        p->table_fd[slot] = -1;
-
-    return mjs_epoll_ctl(p, EPOLL_CTL_DEL, fd, 0);
+        p->table_fd[slot] = MJS_EPOLL_TOMB; /* tombstone: keeps probe chains intact */
+    return rc;
 }
 
 int mjs_epoll_wait(mjs_epoller *p, mjs_poll_event *events, unsigned cap,
@@ -252,10 +273,13 @@ int mjs_epoll_wait(mjs_epoller *p, mjs_poll_event *events, unsigned cap,
 
     if (timeout_ns != NULL) {
         uint64_t ns = *timeout_ns;
-        if (ns == 0ull)
+        if (ns == 0ull) {
             tm = 0;
-        else {
-            uint64_t ms = ns / 1000000ull;
+        } else {
+            /* Round up: a sub-millisecond deadline must not truncate to 0 ms,
+             * which would make epoll_wait return immediately and spin the
+             * reactor until the deadline actually expires. */
+            uint64_t ms = (ns + 999999ull) / 1000000ull;
             tm = (ms > (uint64_t)0x7FFFFFFF) ? 0x7FFFFFFF : (int)ms;
         }
     }
@@ -295,8 +319,8 @@ int mjs_epoll_wait(mjs_epoller *p, mjs_poll_event *events, unsigned cap,
          * fd's token from the per-fd table before emitting. */
         {
             unsigned slot = mjs_epoll_slot(p, rfd);
-            if (p->table_fd[slot] != rfd)
-                continue; /* raced: registration dropped mid-wait */
+            if (slot >= MJS_EPOLL_TABLE_CAP || p->table_fd[slot] != rfd)
+                continue; /* raced: registration dropped mid-wait, or table full */
             events[filled].token = p->table_tok[slot];
         }
         events[filled].fd = rfd;
