@@ -32,8 +32,3 @@ s5-ctx-api	https://github.com/mojito-async/mojito-sys/issues/173	2026-08-30
 # flake, not a code defect here; the flake protocol issue #169 sets out is
 # an issue + a dated row, never `--no-verify`.
 bench	https://github.com/mojito-async/mojito-sys/issues/175	2026-08-30
-# s3-atomic-wait-mojo (S3.3, inside the s3-tests battery) is intermittently
-# red — different verdicts across identical back-to-back runs with no code
-# change. Battery-level row (run-suite.sh doesn't split S3 finer yet); #176
-# also asks for a s3-atomic-wait split mirroring s5-ctx-api/s5-other.
-s3-tests	https://github.com/mojito-async/mojito-sys/issues/176	2026-08-30

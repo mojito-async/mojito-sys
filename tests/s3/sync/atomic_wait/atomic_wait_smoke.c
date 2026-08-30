@@ -95,15 +95,28 @@ static void *ping_main(void *arg) {
          * and re-check the predicate after EVERY .ok (spurious and
          * EAGAIN-style returns just re-arm). My value is produced only
          * by the peer's flip, so alternation is strict and the final
-         * parity is guaranteed; no last-writer race exists. */
-        while (atomic_load_explicit(pa->turn, memory_order_acquire) !=
-               (uint32_t)pa->my_turn) {
+         * parity is guaranteed; no last-writer race exists.
+         *
+         * `cur` is read ONCE per attempt and reused for BOTH the loop
+         * condition and the mjs_atomic_wait_on_u32 `expected` argument.
+         * Reading pa->turn separately for each (as this used to) is a
+         * TOCTOU: if the peer's full flip+wake lands between the two
+         * loads, the second one can observe OUR OWN turn value, arming
+         * the wait with expected == my_turn. Since *turn already equals
+         * my_turn at that point, the call links and blocks waiting for
+         * a change away from it — a transition only this same,
+         * now-blocked thread was ever going to produce. Self-deadlock,
+         * resolved only by the 30s per-call deadline (issue #176: this
+         * exact mechanism hit the Mojo wrapper's ping-pong sub-case, and
+         * independently this C smoke test's own ping-pong, once in 20
+         * `run.sh` cycles here). */
+        uint32_t cur = atomic_load_explicit(pa->turn, memory_order_acquire);
+        while (cur != (uint32_t)pa->my_turn) {
             uint64_t dl = abs_deadline_ms(30000);
-            uint32_t cur =
-                atomic_load_explicit(pa->turn, memory_order_relaxed);
             int rc = mjs_atomic_wait_on_u32(turn, cur, &dl);
             if (rc != 0)
                 return (void *)(intptr_t)-1;
+            cur = atomic_load_explicit(pa->turn, memory_order_acquire);
         }
         atomic_store_explicit(
             pa->turn, (uint32_t)(1 - pa->my_turn), memory_order_release);

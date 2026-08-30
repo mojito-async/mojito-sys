@@ -210,11 +210,29 @@ def _ping_entry(ud: CellsPtr) abi("C") -> Int64:
         # alternation follows: my value is produced ONLY by the peer's
         # flip, so exactly one store happens per direction per round and
         # the final parity is guaranteed (no last-writer race).
-        while turn[] != mine:
+        #
+        # `cur` is read ONCE per attempt and reused for BOTH the loop
+        # condition and the `expected` argument below (matching
+        # wait_until_changed's reference shape in atomic_wait.mojo).
+        # Re-reading turn[] separately for each was a real TOCTOU: if the
+        # peer's full flip+wake landed between the two reads, the second
+        # read could observe OUR OWN value, arming wait_on_u32 with
+        # expected == mine. Since *turn already equals mine at that
+        # point, the call would link and block waiting for turn to
+        # change AWAY from mine — a transition only this same thread
+        # (now stuck inside the call) was ever going to produce, i.e. a
+        # self-deadlock resolved only by the per-call deadline. This is
+        # the mechanism behind issue #176's flake: reproduced twice in
+        # the first 6 pre-fix runs (1 standalone lane run + 5 direct
+        # binary runs), always this sub-case, always ~PING_WAIT_MS
+        # elapsed; 0 failures in 47+ runs after this fix (25 direct +
+        # 22 standalone-lane) plus 24/24 clean full-battery runs.
+        var cur = turn[]
+        while cur != mine:
             try:
                 var st = wait_on_u32(
                     turn,
-                    turn[],
+                    cur,
                     Optional[MonotonicInstant](now_plus(PING_WAIT_MS)),
                 )
                 if st != WaitStatus.ok:
@@ -223,6 +241,7 @@ def _ping_entry(ud: CellsPtr) abi("C") -> Int64:
             except:
                 ud[3] = 1
                 return -1
+            cur = turn[]
         turn[] = UInt32(1) - mine
         _ = wake_one_u32(turn)
         i += 1
