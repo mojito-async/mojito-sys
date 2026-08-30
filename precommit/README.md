@@ -4,14 +4,33 @@ Every commit in this repo runs `precommit/gate.sh` locally:
 
 - **Tier 0 — validators (always block):** staged whitespace errors, build
   artifacts/junk staged, unresolved conflict markers.
-- **Tier 1 — test suite (blocks unless known-red):** `make selftest`
-  (allocator, 31 checks), `make test` (T1–T7 semantic harness), T8–T14
-  (register/TLS/guard/audit, via `tests/spike/run_t8_t14.sh`), `make bench`.
-  A failing test blocks the commit UNLESS it is allow-listed as an
-  intentional TDD-red test in `precommit/known-red.tsv` (with tracking issue);
-  the row must be removed when the test goes green.
-- **`MOJITO_GATE_FAST=1`** skips the slow suite (T8–T14 builds + bench) for
-  hot iterations; validators and T1–T7 still run.
+- **Tier 1 — suite (blocks unless known-red):** `precommit/run-suite.sh`,
+  scored PER DRIVER against `precommit/known-red.tsv` (issue
+  mojito-async/mojito-async#169, ported from mojito-async's gate). Batteries:
+  `selftest` (allocator, 31 checks), `t1-t7` (`make test`), `t8-t14`
+  (register/TLS/guard/audit), `bench`, `s1-tests` through `s3-tests`,
+  `s5-ctx-api` / `s5-other` (S5 split so the api lane's own known-red row
+  can't shield the rest of S5), `no-markers`. A failing driver blocks the
+  commit UNLESS it is allow-listed as intentional TDD-red in
+  `precommit/known-red.tsv` (with tracking issue); the row must be removed
+  when the driver goes green.
+- **`MOJITO_GATE_FAST=1`** skips Tier 1 entirely (validators only).
+
+## Cost tiers (issue mojito-async/mojito-async#169)
+
+The gate picks a Tier 1 cost tier from what's actually staged:
+
+| tier | when | what runs |
+|---|---|---|
+| `hermetic` | every staged path is `*.md` / `docs/**` | `selftest` + `no-markers` only |
+| `affected` | every staged path is test-only (`tests/**`, `benchmark/**`, or `precommit/known-red.tsv`) | `selftest` + `no-markers`, plus only the batteries the diff's directories touch |
+| `full` | anything else (`native/`, `mojito_sys/`, `Makefile`, the gate itself, a mixed diff, or nothing staged) | every battery, unscoped |
+
+`MOJITO_GATE_TIER=full|affected|hermetic` overrides the auto-pick. CI always
+runs `full` explicitly, since a checkout has nothing staged to auto-detect
+from. The tier only changes what the local hook checks before a commit
+lands — CI's `full` run on the pushed branch is what actually gates the
+merge (branch protection on `main` requires it).
 
 ## Install
 
@@ -38,6 +57,25 @@ Lanes land failing tests first (WIP PRs). The gate knows the difference:
 
 `git commit --no-verify` bypasses the gate. Use it only when the gate itself
 is broken (not when tests are red) and file an issue for the gate.
+
+## The `GATE:` trailer
+
+If you use `git commit --no-verify`, add a trailer to the commit message
+naming why and what ran instead:
+
+```
+GATE: skipped — <reason>. Ran instead: <what you actually verified, e.g.
+"./tests/s1/run.sh, PASS">
+```
+
+This is not an enforcement mechanism — nothing in git records whether a
+hook actually ran, so a trailer is a claim like any commit message, not
+proof (mojito-async/mojito-async#169's own finding: two of the four
+mojito-sys remediation commits that used `--no-verify` were missing exactly
+this trailer). Enforcement lives in CI + branch protection now, not in the
+local hook or its trailers. The trailer's job is narrower: it is a
+breadcrumb for whoever reads the commit later, so "why was this skipped"
+doesn't require asking the author.
 
 ## Host rules (same as claude/OX agents on this host)
 

@@ -1,11 +1,39 @@
-# Intentional TDD-red tests. Format: <test-name>\t<tracking-issue-url>
+# Intentional TDD-red DRIVERS. Three TAB-separated fields:
 #
-# precommit/gate.sh runs the full suite on every commit. A failing test that
-# is listed here is expected (TDD: red test first, implementation lands in a
-# later commit of the same PR) and does NOT block the commit; the failure is
-# still logged. Remove the row as soon as the implementation turns the test
-# green — an unlisted failure blocks the commit.
+#   <driver-name>	<tracking-issue-url>	<yyyy-mm-dd added>
 #
-# Rows are matched on the <test-name> printed by the suite (e.g. `bench`,
-s5-tests	https://github.com/mojito-async/mojito-sys/issues/67
-s6-completion-probe	https://github.com/mojito-async/mojito-sys/issues/77
+# <driver-name> is the name precommit/run-suite.sh prints in its own
+# VERDICT line (VERDICT<TAB><name><TAB><PASS|RED|FAIL>) — one row per name
+# actually emitted there, at whatever granularity that script uses (a whole
+# battery in this repo, e.g. `s1-tests`/`bench`; split finer only where
+# there's a reason to, e.g. `s5-ctx-api` vs `s5-other`). precommit/gate.sh
+# refuses a row naming a reserved tier keyword (full/affected/hermetic,
+# never real driver names), a row whose tracking issue is CLOSED, and a row
+# older than the staleness horizon (MOJITO_GATE_RED_MAX_AGE_DAYS, default
+# 30).
+#
+# Remove the row the moment the driver goes green. An unlisted failing
+# driver blocks the commit.
+#
+# History (issue mojito-async/mojito-async#169): this file used to be
+# matched by a bare `grep`, two fields, no validation at all. Two of its
+# rows were rot: `s5-tests` pointed at mojito-sys#67, which closed the
+# moment PR #118 merged the very api-mojo lane that row was still masking
+# (that lane is genuinely red today — split out below as `s5-ctx-api`,
+# tracked by the new issue #173, since #67 covers work that DID land).
+# `s6-completion-probe` pointed at a different closed issue (#77) and
+# matched no check name printed by anything in this tree, so it shielded
+# nothing while looking like a legitimate row — removed outright, no
+# replacement needed.
+s5-ctx-api	https://github.com/mojito-async/mojito-sys/issues/173	2026-08-30
+# `make bench` crashes intermittently (SIGTRAP inside Mojo's own
+# libKGENCompilerRTShared.dylib during the sampled-latency phase, ~2 of 3
+# runs when its stdout is captured, as the gate always does) — a genuine
+# flake, not a code defect here; the flake protocol issue #169 sets out is
+# an issue + a dated row, never `--no-verify`.
+bench	https://github.com/mojito-async/mojito-sys/issues/175	2026-08-30
+# s3-atomic-wait-mojo (S3.3, inside the s3-tests battery) is intermittently
+# red — different verdicts across identical back-to-back runs with no code
+# change. Battery-level row (run-suite.sh doesn't split S3 finer yet); #176
+# also asks for a s3-atomic-wait split mirroring s5-ctx-api/s5-other.
+s3-tests	https://github.com/mojito-async/mojito-sys/issues/176	2026-08-30
