@@ -67,7 +67,12 @@
 /* ---- raw syscall wrappers (io_uring needs no liburing) -------------------
  * syscall() returns -1 on error with errno set; these decode to the frozen
  * contract's negative -errno. On success they return 0 (or a non-negative
- * informational value). */
+ * informational value): ioring_setup returns the ring FD, and ioring_enter
+ * returns the NUMBER OF SQES CONSUMED, which for a one-SQE batch is 1. These
+ * are count-or-negative, NOT the file's 0-or-negative entry-point contract,
+ * so every caller MUST test `rc < 0` and NEVER `rc != 0`. Reading a count as
+ * an error is issue #167: it made mjs_iouring_create tear down the ring it
+ * had just built and return +1, a value that is neither 0 nor -errno. */
 static int ioring_setup(unsigned entries, struct io_uring_params *p)
 {
     long r = syscall(__NR_io_uring_setup, entries, p);
@@ -195,7 +200,16 @@ static struct io_uring_sqe *uring_get_sqe(struct mjs_uring *u)
     return sqe;
 }
 
-/* Commit sqes handed out since the last commit and optionally submit. */
+/* Commit sqes handed out since the last commit and optionally submit.
+ *
+ * RETURNS THE NUMBER OF SQES CONSUMED, or negative -errno. This is the
+ * kernel's count riding straight through from ioring_enter, NOT the
+ * 0-or-negative contract the mjs_iouring_* entry points publish. A short
+ * submit (consumed < pending) is real information and is deliberately kept
+ * here rather than clamped away. Callers MUST check `rc < 0`; `rc != 0`
+ * reads a successful submit as a failure (issue #167). Callers that need
+ * the entry-point contract go through uring_submit_poll_add, which
+ * normalises. */
 static int uring_submit(struct mjs_uring *u, unsigned min_complete,
                         unsigned flags)
 {
@@ -265,7 +279,10 @@ static int uring_stage_timeout_remove(struct mjs_uring *u)
 }
 
 /* Stage a poll_add, flushing the SQ once on queue-full (-EAGAIN); then
- * submit the batch. Never blocks. Returns 0 or negative errno. */
+ * submit the batch. Never blocks. Returns 0 or negative errno: this is the
+ * boundary where uring_submit's SQE COUNT is normalised to the file's
+ * entry-point contract, and it is the only place that normalisation happens
+ * (issue #167). */
 static int uring_submit_poll_add(struct mjs_uring *u, int fd, int poll_mask,
                                  uint64_t user_data)
 {
@@ -278,7 +295,8 @@ static int uring_submit_poll_add(struct mjs_uring *u, int fd, int poll_mask,
     }
     if (rc != 0)
         return rc;
-    return uring_submit(u, 0, 0);
+    rc = uring_submit(u, 0, 0);
+    return (rc < 0) ? rc : 0; /* drop the SQE count: 0 == success (#167) */
 }
 
 /* mjs_iouring_probe(): pure predicate — does THIS KERNEL support io_uring?
