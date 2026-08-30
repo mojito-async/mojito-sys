@@ -124,6 +124,7 @@ if [ "$TIER" = "affected" ]; then
     # ...) reruns the whole s3-other battery rather than trying to scope
     # further — same call S5 makes for its own non-api lanes.
     touches "tests/s3/" && run_driver s3-other env MOJITO_SKIP_S3_ATOMIC_WAIT=1 MOJO="$MOJO" ./tests/s3/run.sh
+    touches "tests/s6/" && run_driver s6-tests make test-s6
     touches "tests/s5/ctx/api/" && run_driver s5-ctx-api ./tests/s5/ctx/api/run.sh
     # Any other S5 path (ctx/sentinel, ctx/lifecycle, x86, ...) reruns the
     # whole s5-other battery rather than trying to scope further — S5's own
@@ -158,5 +159,12 @@ run_driver s3-other         env MOJITO_SKIP_S3_ATOMIC_WAIT=1 MOJO="$MOJO" ./test
 # lane's known-red row the way it could when `s5-tests` covered both.
 run_driver s5-ctx-api       ./tests/s5/ctx/api/run.sh
 run_driver s5-other         env MOJITO_SKIP_S5_CTX_API=1 MOJO="$MOJO" ./tests/s5/run.sh
+# S6 stays a single driver (issue #174), unlike S5's split above: nothing
+# under tests/s6/ is known-red today, so there is no lane to carve out of
+# it. `make test-s6` itself already turns a lane's ENVIRONMENT result
+# (exit 2, no real Linux kernel on this host) into a matrix ENV row rather
+# than a failure, so this driver reports PASS on a macOS dev host without
+# needing a known-red row of its own — see tests/s6/run.sh's header.
+run_driver s6-tests         make test-s6
 
 exit "$rc"

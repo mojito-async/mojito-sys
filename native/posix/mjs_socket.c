@@ -144,6 +144,17 @@ int mjs_socket_socket(int family, int type, int *out_fd)
     int fd = socket(af, type, 0);
     if (fd < 0)
         return -errno;
+    /* FD_CLOEXEC: without it every socket this creates -- listeners
+     * included -- survives into any child the embedding process ever
+     * forks+execs (issue #181). accept4()/SOCK_CLOEXEC would do this in
+     * one syscall on Linux but is not portable to darwin, so this uses the
+     * same portable fcntl the accept() path below already relies on for
+     * O_NONBLOCK inheritance. */
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
+        int e = errno;
+        close(fd);
+        return -e;
+    }
     *out_fd = fd;
     return 0;
 }
@@ -223,6 +234,15 @@ int mjs_socket_accept(int fd, int *out_client, mjs_sockaddr *out_peer)
     int c = accept(fd, peer, peerlen);
     if (c < 0)
         return -errno;
+
+    /* FD_CLOEXEC (see mjs_socket_socket, issue #181): plain accept() does
+     * not inherit it, so every accepted connection would otherwise leak
+     * into a forked child same as a listener would. */
+    if (fcntl(c, F_SETFD, FD_CLOEXEC) < 0) {
+        int e = errno;
+        close(c);
+        return -e;
+    }
 
     /* Deterministic O_NONBLOCK inheritance (see file header). */
     int child_flags = fcntl(c, F_GETFL, 0);
