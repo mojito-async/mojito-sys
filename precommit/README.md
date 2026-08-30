@@ -8,9 +8,11 @@ Every commit in this repo runs `precommit/gate.sh` locally:
   scored PER DRIVER against `precommit/known-red.tsv` (issue
   mojito-async/mojito-async#169, ported from mojito-async's gate). Batteries:
   `selftest` (allocator, 31 checks), `t1-t7` (`make test`), `t8-t14`
-  (register/TLS/guard/audit), `bench`, `s1-tests` through `s3-tests`,
-  `s5-ctx-api` / `s5-other` (S5 split so the api lane's own known-red row
-  can't shield the rest of S5), `no-markers`. A failing driver blocks the
+  (register/TLS/guard/audit), `bench`, `s1-tests`, `s2-tests` and its
+  siblings, `s3-atomic-wait` / `s3-other` (S3 split so the atomic_wait
+  lane's own known-red row can't shield the rest of S3), `s5-ctx-api` /
+  `s5-other` (S5 split so the api lane's own known-red row can't shield
+  the rest of S5), `no-markers`. A failing driver blocks the
   commit UNLESS it is allow-listed as intentional TDD-red in
   `precommit/known-red.tsv` (with tracking issue); the row must be removed
   when the driver goes green.
