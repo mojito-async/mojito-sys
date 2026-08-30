@@ -39,7 +39,8 @@ SELFTEST_BIN := $(BUILD)/selftest
 
 .DELETE_ON_ERROR:
 .PHONY: test-s6 all selftest test bench test-s1 test-s2 test-s2-conformance \
-        test-s2-stress test-s2-integration test-s2-pkg test-s3 test-s5 bench-io clean
+        test-s2-stress test-s2-integration test-s2-pkg test-s3 test-s5 \
+        test-contract-sweep bench-io clean
 
 all: $(DYLIB) $(SELFTEST_BIN) $(DYLIB_SYS)
 
@@ -102,6 +103,15 @@ test-s3: $(DYLIB_SYS)
 
 test-s5: $(DYLIB_SYS)
 	MOJO=$(MOJO) ./tests/s5/run.sh
+
+# ABI-wide contract sweep (mojito-async#170, fix item 1): every public
+# mjs_* entry point in the 0-or-negative-errno family gets a real,
+# live-handle invocation whose rc sign is checked. Runs on every host (no
+# platform guard): unsupported backends (epoll off Linux, io_uring
+# without host support / MOJITO_IO_URING=1) degrade to a real, in-contract
+# -ENOSYS this driver observes and sweeps rather than skipping.
+test-contract-sweep: $(DYLIB_SYS)
+	@CC=$(CC) ./tests/contract_sweep/run.sh
 
 # S6 I/O conformance lanes (mojito-async#141 item 5: these existed with no
 # Makefile target at all, so the I/O layer was inside no gate).  Each lane
