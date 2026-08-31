@@ -35,3 +35,4 @@ s5-ctx-api	https://github.com/mojito-async/mojito-sys/issues/142	2026-08-30
 # sets out is an issue plus a dated row, never `--no-verify`. Tracked by
 # #129, which owns the paired benchmark harness this crashes inside.
 bench	https://github.com/mojito-async/mojito-sys/issues/129	2026-08-30
+s3-other	https://github.com/mojito-async/mojito-sys/issues/192	2026-08-31
