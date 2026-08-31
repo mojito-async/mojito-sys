@@ -1,11 +1,14 @@
-# S0-T6 — repeated switching (mojito-sys #11)
+# S0/M1.4-T6 — repeated switching (mojito-sys #11; re-pointed for #128)
 #
 # Spec §6.5: perform a high iteration count of
 #   context A -> context B -> context A
 # with mutable stack-local state checked on EVERY iteration.
 #
-# 10000 round trips; both sides increment and cross-check handshake counters
-# each iteration, plus verify per-side stack-local accumulator invariants.
+# 10,000,000 round trips (#128's acceptance bar: "ten million repeated
+# switches run clean"); both sides increment and cross-check handshake
+# counters each iteration, plus verify per-side stack-local accumulator
+# invariants. i*(i+1)/2 at i=10,000,000 is ~5e13, nowhere near Int64
+# overflow.
 
 from std.memory import stack_allocation
 
@@ -20,7 +23,7 @@ from ctx_direct import (
 )
 
 comptime STACK_BYTES = 262144
-comptime ITERATIONS = 10000
+comptime ITERATIONS = 10_000_000
 
 
 struct Frame:

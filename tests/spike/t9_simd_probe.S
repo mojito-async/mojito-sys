@@ -1,34 +1,41 @@
 /*
- * t9_simd_probe.S — S0-T9 probe: callee-saved FP/SIMD register preservation
- * across ms_ctx_switch (aarch64, AAPCS64, Mach-O).
- *
- * Owner: tests lane B (issue #12). Built and resolved exactly like
- * t8_gpr_probe.S: no link-time spike references; runtime dlsym after the
- * Mojo driver dlopen()s libmojito_spike.dylib.
+ * t9_simd_probe.S — S0/M1.4-T9 probe: callee-saved FP/SIMD register
+ * preservation across ms_context_switch (aarch64, AAPCS64, Mach-O).
+ * RE-POINTED (#128) at the PRODUCTION native/posix/ms_context_aarch64.S
+ * `ms_context_switch`/`ms_context_init`, called directly (statically
+ * linked, no dlsym indirection -- see t8_gpr_probe.S's header for the
+ * full account of why; this probe follows the identical pattern).
  *
  * AAPCS64 requires the callee to preserve the LOW 64 BITS of v8-v15
  * (i.e. d8-d15); the upper halves are caller-saved. This probe fills
  * d8..d15 with distinct bit patterns inside the synthetic context, yields,
  * resumes, and verifies every pattern bit-exactly via fmov-to-GPR compares.
  *
- * Exported:
- *   Int32 t9_init(void)       0 = every required symbol resolved
- *   Int   t9_alloc(Int bytes) -> initial SP of a fresh guarded stack (0 = fail)
- *   void  t9_free(void)
- *   Int   t9_run(Int top)     corruption bitmask; 0 = all preserved
+ * Unlike t8_gpr_probe.S, x19 is never part of the payload under test here
+ * (only d8-d15 are), so it is safe to keep "shared" parked in x19 across
+ * POISOND -- no g_shared reload is needed for that reason. g_shared is
+ * still used to pass the pointer into t9_entry (a fresh context has no
+ * other way to receive it before x19 is established there).
  *
- * Bit map returned by t9_run:
+ * Exported:
+ *   Int   t9_run(Int stack_low, Int stack_top)   corruption bitmask (0 =
+ *                                                 all preserved; -1 = the
+ *                                                 probe's own malloc failed)
+ *
+ * v3 LIFECYCLE (#128): main_ctx is self-captured (ms_context_switch(main,
+ * main)) before the first switch-out, exactly like t8_gpr_probe.S.
+ *
+ * Shared block layout (malloc'd by t9_run, 1024 bytes):
+ *   +0    main ctx save area (MS_CONTEXT_SIZE is 200 bytes; 224 reserved)
+ *   +224  B ctx save area
+ *   +448  corruption mask written by entry before final switch
+ *
+ * Bit map returned by t9_run (unchanged from the S0 version):
  *   0..7   d8..d15 (low 64 bits of v8..v15) corrupted inside B
  *   8      sp not 16-byte aligned at trampoline->entry handoff
  *   9      sp not 16-byte aligned at post-switch resume
  *   10..17 scheduler-side d8..d15 poison lost (main-context fps)
  */
-
-.section __TEXT,__cstring,cstring_literals
-Lsym_alloc:   .asciz "ms_stack_alloc"
-Lsym_free:    .asciz "ms_stack_free"
-Lsym_make:    .asciz "ms_ctx_make"
-Lsym_switch:  .asciz "ms_ctx_switch"
 
 .section __TEXT,__const
 .align 3
@@ -56,16 +63,10 @@ Lt9_poison:
 
 .data
 .align 3
-g_alloc:     .quad 0
-g_free:      .quad 0
-g_make:      .quad 0
-g_switch:    .quad 0
-g_base:      .quad 0
-g_top:       .quad 0
 /* shared block handed to the synthetic context (malloc'd by t9_run):
- *   +0    main ctx save area (ms_ctx_t is 168 bytes in contract v2)
- *   +192  b ctx save area
- *   +384  corruption mask written by entry before final switch
+ *   +0    main ctx save area
+ *   +224  b ctx save area
+ *   +448  corruption mask written by entry before final switch
  */
 g_shared:    .quad 0
 
@@ -86,115 +87,57 @@ g_shared:    .quad 0
     ldr d15, [x16, #56]
 .endm
 
+/* T9POISONCHK idx, reg, bit — one poison-register comparison, OR'd into
+ * x11 at the given bit. Clobbers x9, x10.
+ *
+ * MUST be a GNU `.macro` (one instruction per line), NOT a C-preprocessor
+ * `#define` with `;`-joined instructions on one logical line: found while
+ * mutation-testing this probe (deliberately breaking a check and
+ * confirming the test catches it, per repo convention) that Apple's
+ * clang integrated assembler treats `;` as an END-OF-LINE COMMENT
+ * character for this target, not a statement separator. A `#define`
+ * whose body joins several instructions with `;` therefore silently
+ * assembles to ONLY ITS FIRST INSTRUCTION per invocation -- the rest is
+ * treated as a comment and discarded, with NO error or warning from
+ * either cpp or the assembler. That made this exact check vacuous (it
+ * could never trip regardless of real corruption) before this fix; see
+ * the PR body for the full account and mojito-sys#205. */
+.macro T9POISONCHK idx, reg, bit
+    ldr  x9, [x16, #(\idx*8)]
+    fmov x10, \reg
+    cmp  x10, x9
+    cset x10, ne
+    lsl  x10, x10, #\bit
+    orr  x11, x11, x10
+.endm
+
 /* CHKPOISOND — verify d8-d15 still hold the poison patterns; leaves the
  * mismatch bitmask (bits 0..7) in x11. Clobbers x9, x10, x16. */
 .macro CHKPOISOND
     adrp x16, Lt9_poison@PAGE
     add  x16, x16, Lt9_poison@PAGEOFF
     mov  x11, xzr
-#define T9POISONCHK(idx, reg, bit)    \
-    ldr  x9, [x16, #(idx*8)];         \
-    fmov x10, reg;                    \
-    cmp  x10, x9;                     \
-    cset x10, ne;                     \
-    lsl  x10, x10, #bit;              \
-    orr  x11, x11, x10
-    T9POISONCHK(0, d8,  0)
-    T9POISONCHK(1, d9,  1)
-    T9POISONCHK(2, d10, 2)
-    T9POISONCHK(3, d11, 3)
-    T9POISONCHK(4, d12, 4)
-    T9POISONCHK(5, d13, 5)
-    T9POISONCHK(6, d14, 6)
-    T9POISONCHK(7, d15, 7)
-#undef T9POISONCHK
+    T9POISONCHK 0, d8,  0
+    T9POISONCHK 1, d9,  1
+    T9POISONCHK 2, d10, 2
+    T9POISONCHK 3, d11, 3
+    T9POISONCHK 4, d12, 4
+    T9POISONCHK 5, d13, 5
+    T9POISONCHK 6, d14, 6
+    T9POISONCHK 7, d15, 7
 .endm
 .align 2
 
-/* Int32 t9_init(void) -> 0 when every required symbol resolved */
-.globl _t9_init
-.extern _dlsym
-_t9_init:
-    stp x29, x30, [sp, #-16]!
-    mov x29, sp
-    mov x0, #-2                          /* RTLD_DEFAULT */
-    adrp x1, Lsym_alloc@PAGE
-    add  x1, x1, Lsym_alloc@PAGEOFF
-    bl  _dlsym
-    adrp x9, g_alloc@PAGE
-    str x0, [x9, g_alloc@PAGEOFF]
-    cbz x0, Lt9_missing
-    mov x0, #-2
-    adrp x1, Lsym_free@PAGE
-    add  x1, x1, Lsym_free@PAGEOFF
-    bl  _dlsym
-    adrp x9, g_free@PAGE
-    str x0, [x9, g_free@PAGEOFF]
-    cbz x0, Lt9_missing
-    mov x0, #-2
-    adrp x1, Lsym_make@PAGE
-    add  x1, x1, Lsym_make@PAGEOFF
-    bl  _dlsym
-    adrp x9, g_make@PAGE
-    str x0, [x9, g_make@PAGEOFF]
-    cbz x0, Lt9_missing
-    mov x0, #-2
-    adrp x1, Lsym_switch@PAGE
-    add  x1, x1, Lsym_switch@PAGEOFF
-    bl  _dlsym
-    adrp x9, g_switch@PAGE
-    str x0, [x9, g_switch@PAGEOFF]
-    cbz x0, Lt9_missing
-    mov w0, #0
-    b   Lt9_init_done
-Lt9_missing:
-    mov w0, #1
-Lt9_init_done:
-    ldp x29, x30, [sp], #16
-    ret
-
-/* Int t9_alloc(Int bytes) -> initial SP or 0 */
-.globl _t9_alloc
-_t9_alloc:
-    stp x29, x30, [sp, #-16]!
-    mov x29, sp
-    adrp x9, g_alloc@PAGE
-    ldr x15, [x9, g_alloc@PAGEOFF]
-    adrp x9, g_base@PAGE
-    add x1, x9, g_base@PAGEOFF
-    adrp x9, g_top@PAGE
-    add x2, x9, g_top@PAGEOFF
-    blr x15
-    cbz w0, Lt9_alloc_ok
-    mov x0, #0
-    b   Lt9_alloc_done
-Lt9_alloc_ok:
-    adrp x9, g_top@PAGE
-    ldr x0, [x9, g_top@PAGEOFF]
-Lt9_alloc_done:
-    ldp x29, x30, [sp], #16
-    ret
-
-/* void t9_free(void) */
-.globl _t9_free
-_t9_free:
-    stp x29, x30, [sp, #-16]!
-    mov x29, sp
-    adrp x9, g_free@PAGE
-    ldr x15, [x9, g_free@PAGEOFF]
-    adrp x9, g_base@PAGE
-    ldr x0, [x9, g_base@PAGEOFF]
-    blr x15
-    ldp x29, x30, [sp], #16
-    ret
-
-/* Int t9_run(Int top) -> corruption bitmask (0 = all preserved).
+/* Int t9_run(Int stack_low [x0], Int stack_top [x1]) -> corruption bitmask
+ * (0 = all preserved; -1 = probe's own malloc failed).
  * The scheduler keeps the shared pointer in x19 across switches; that is a
  * legitimate reliance on GPR callee-savedness (exercised by T8 separately),
  * while THIS test targets d8-d15. */
 .globl _t9_run
 .extern _malloc
 .extern _free
+.extern _ms_context_init
+.extern _ms_context_switch
 .align 2
 _t9_run:
     stp x29, x30, [sp, #-16]!
@@ -202,53 +145,56 @@ _t9_run:
     stp x19, x20, [sp, #-16]!
     stp x21, x22, [sp, #-16]!
 
-    mov x20, x0                          /* top */
+    mov x20, x0                          /* stack_low */
+    mov x22, x1                          /* stack_top */
     mov x0, #1024
     bl  _malloc
     cbz x0, Lt9_run_fail
+    adrp x16, g_shared@PAGE
+    str x0, [x16, g_shared@PAGEOFF]
+    str xzr, [x0, #448]
     mov x19, x0                          /* shared */
-    str xzr, [x19, #384]
 
-    /* ms_ctx_make(shared+192, top, t9_entry, shared) */
-    add x0, x19, #192
+    /* self-capture main ctx (v3 lifecycle) */
+    mov x0, x19
+    mov x1, x19
+    bl  _ms_context_switch
+
+    /* ms_context_init(shared+224, stack_low, stack_size, t9_entry, shared) */
+    add x0, x19, #224
     mov x1, x20
-    adrp x2, _t9_entry@PAGE
-    add  x2, x2, _t9_entry@PAGEOFF
-    mov x3, x19
-    adrp x9, g_make@PAGE
-    ldr x15, [x9, g_make@PAGEOFF]
-    blr x15
+    sub x2, x22, x20
+    adrp x3, _t9_entry@PAGE
+    add  x3, x3, _t9_entry@PAGEOFF
+    mov x4, x19
+    bl  _ms_context_init
 
     /* Poison the scheduler's own d8-d15, then enter B. If the impl fails
      * to save/restore the MAIN context's fps on the round trip, our poison
-     * is gone when we come back and bits 10-17 trip below. */
+     * is gone when we come back and bits 10-17 trip below. x19 is never
+     * poisoned (only d8-d15 are), so it stays valid as "shared" here
+     * unlike t8_gpr_probe.S's x19-under-test case. */
     POISOND
-    /* enter B (B runs to its yield) ... */
     mov x0, x19
-    add x1, x19, #192
-    adrp x9, g_switch@PAGE
-    ldr x15, [x9, g_switch@PAGEOFF]
-    blr x15
+    add x1, x19, #224
+    bl  _ms_context_switch
 
     /* Re-poison before resuming B: B's magics must be restored from ITS
      * saved context; if the impl never saved them at the yield, B now sees
      * this scheduler-side poison instead and fails its check. */
     POISOND
-    /* ... resume B: it verifies d8-d15 and its final switch lands here */
     mov x0, x19
-    add x1, x19, #192
-    adrp x9, g_switch@PAGE
-    ldr x15, [x9, g_switch@PAGEOFF]
-    blr x15
+    add x1, x19, #224
+    bl  _ms_context_switch
 
     /* Scheduler-side: did OUR d8-d15 poisons survive? -> bits 10-17 */
     CHKPOISOND
     lsl x11, x11, #10
-    ldr x10, [x19, #384]
+    ldr x10, [x19, #448]
     orr x10, x10, x11
-    str x10, [x19, #384]
+    str x10, [x19, #448]
 
-    ldr x21, [x19, #384]
+    ldr x21, [x19, #448]
     mov x0, x19
     bl  _free
     mov x0, x21
@@ -272,14 +218,14 @@ Lt9_run_fail:
 .align 2
 _t9_entry:
     mov x19, x0
-    str xzr, [x19, #384]                 /* mask = 0 */
+    str xzr, [x19, #448]                 /* mask = 0 */
 
     /* trampoline->entry handoff alignment -> bit 8 */
     mov x14, sp
     tst x14, #15
     cset x10, ne
     lsl x10, x10, #8
-    str x10, [x19, #384]
+    str x10, [x19, #448]
 
     /* load magic patterns into d8..d15 from the literal pool */
     adrp x16, Lt9_vals@PAGE
@@ -293,36 +239,28 @@ _t9_entry:
     ldr d14, [x16, #48]
     ldr d15, [x16, #56]
 
-    /* ---- yield: from = B (+112), to = main (+0) ---- */
-    add x0, x19, #192
+    /* ---- yield: from = B (+224), to = main (+0) ---- */
+    add x0, x19, #224
     mov x1, x19
-    adrp x9, g_switch@PAGE
-    ldr x15, [x9, g_switch@PAGEOFF]
-    blr x15
+    bl  _ms_context_switch
 
     /* ---- resumed: verify d8..d15 bit-exactly ---- */
     adrp x16, Lt9_vals@PAGE
     add  x16, x16, Lt9_vals@PAGEOFF
-    ldr  x11, [x19, #384]                /* seed with entry-time bit 8 */
+    ldr  x11, [x19, #448]                /* seed with entry-time bit 8 */
 
-#define T9CHK(idx, reg, bit)          \
-    ldr  x9, [x16, #(idx*8)];         \
-    fmov x10, reg;                    \
-    cmp  x10, x9;                     \
-    cset x10, ne;                     \
-    lsl  x10, x10, #bit;              \
-    orr  x11, x11, x10
-
-    T9CHK(0, d8,  0)
-    T9CHK(1, d9,  1)
-    T9CHK(2, d10, 2)
-    T9CHK(3, d11, 3)
-    T9CHK(4, d12, 4)
-    T9CHK(5, d13, 5)
-    T9CHK(6, d14, 6)
-    T9CHK(7, d15, 7)
-
-#undef T9CHK
+    /* Same shape as T9POISONCHK (defined above, near CHKPOISOND) -- reused
+     * directly rather than duplicating another #define here (that
+     * duplicate #define was the OTHER vacuous-check copy this same bug
+     * hid in before the fix; see T9POISONCHK's comment). */
+    T9POISONCHK 0, d8,  0
+    T9POISONCHK 1, d9,  1
+    T9POISONCHK 2, d10, 2
+    T9POISONCHK 3, d11, 3
+    T9POISONCHK 4, d12, 4
+    T9POISONCHK 5, d13, 5
+    T9POISONCHK 6, d14, 6
+    T9POISONCHK 7, d15, 7
 
     /* post-switch sp alignment -> bit 9 */
     mov x14, sp
@@ -331,14 +269,12 @@ _t9_entry:
     lsl x10, x10, #9
     orr x11, x11, x10
 
-    str x11, [x19, #384]
+    str x11, [x19, #448]
 
     /* ---- final switch back to the scheduler (never returns here) ---- */
-    add x0, x19, #192
+    add x0, x19, #224
     mov x1, x19
-    adrp x9, g_switch@PAGE
-    ldr x15, [x9, g_switch@PAGEOFF]
-    blr x15
+    bl  _ms_context_switch
 
 Lt9_entry_hang:                          /* unreachable */
     b    Lt9_entry_hang

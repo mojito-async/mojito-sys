@@ -1,60 +1,46 @@
-# S0-T9 — callee-saved FP/SIMD register preservation (spec 6.5 / S0-T9; issue #12).
+# S0/M1.4-T9 -- callee-saved FP/SIMD register preservation (spec 6.5 /
+# S0-T9; issue #12; re-pointed for #128).
 #
-# Drives tests/spike/t9_simd_probe.S (linked into this executable) through the
-# frozen C ABI of include/mojito_spike.h. AAPCS64 requires callees to preserve
-# the low 64 bits of v8-v15 (d8-d15); the probe verifies each bit-exactly
-# across a suspend/resume round trip on a guarded synthetic stack.
+# Drives tests/spike/t9_simd_probe.S (linked directly into this executable,
+# statically -- no dlopen/dlsym) against the PRODUCTION
+# ms_context_switch/ms_context_init, on a spike/stack_switch/native_stack.mojo
+# NativeStack. AAPCS64 requires callees to preserve the low 64 bits of
+# v8-v15 (d8-d15); the probe verifies each bit-exactly across a
+# suspend/resume round trip.
 #
-# The spike dylib is dlopen()ed by name; if it is absent the test reports a
-# deterministic RED verdict and exits nonzero.
+# Note for #145's gate: issue #194 already found a SIMD/C-struct-layout
+# incompatibility elsewhere in this epic (a `SIMD[DType.uint8, N]` struct
+# field not matching the equivalent C array layout). That defect is about
+# struct FIELD layout; this test is about register save/restore across a
+# raw asm context switch, a different mechanism -- there is no SIMD struct
+# field anywhere in this probe's shared block (it is plain int64 slots),
+# so #194 does not apply here directly. Flagged for the record in case
+# something related surfaces.
+#
+# AOT ONLY: see tests/spike/run_t8_t14.sh / the switch-half PR notes for why
+# (b2 JIT traps the production v3 lifecycle's first switch).
+#
+# KEEP-ALIVE WORKAROUND (mojito-sys#204): see t8_gpr_preservation.mojo's
+# header note. Same fix applied here.
 
-@extern("dlopen")
-def _c_dlopen(path: Int, mode: Int32) abi("C") -> Int: ...
-
-@extern("exit")
-def _c_exit(code: Int32) abi("C"): ...
-
-@extern("t9_init")
-def _t9_init() abi("C") -> Int32: ...
-
-@extern("t9_alloc")
-def _t9_alloc(num_bytes: Int) abi("C") -> Int: ...
-
-@extern("t9_free")
-def _t9_free() abi("C"): ...
+from native_stack import NativeStack, page_size
 
 @extern("t9_run")
-def _t9_run(top: Int) abi("C") -> Int: ...
+def _t9_run(stack_low: Int, stack_top: Int) abi("C") -> Int: ...
 
-def _addr_of(s: String) -> Int:
-    var buf = InlineArray[Byte, 128](fill=Byte(0))
-    var i = 0
-    for ch in s:
-        buf[i] = Byte(ord(ch))
-        i += 1
-    return Int(UnsafePointer(to=buf))
 
-def main():
-    if _c_dlopen(_addr_of("libmojito_spike.dylib"), 2) == 0:
-        print("T9 RED: cannot dlopen libmojito_spike.dylib - spike implementation absent (issues #8/#9)")
-        _c_exit(1)
-    if _t9_init() != 0:
-        print("T9 RED: required spike symbols not resolvable - implementation incomplete")
-        _c_exit(1)
+def main() raises:
+    var ps = page_size()
+    var stack = NativeStack.create(256 * 1024, 256 * 1024, ps)
 
-    var top = _t9_alloc(256 * 1024)
-    if top == 0:
-        print("T9 FAIL: ms_stack_alloc returned no usable stack")
-        _c_exit(1)
-
-    var mask = _t9_run(top)
-    _t9_free()
+    var mask = _t9_run(stack.guard_low_address(), stack.top_address())
+    _ = stack.base_address()  # keep-alive: see mojito-sys#204
 
     if mask < 0:
         print("T9 FAIL: probe could not allocate its shared block")
-        _c_exit(1)
+        raise Error("T9 failed: probe allocation")
     if mask != 0:
         print("T9 FAIL: FP/SIMD callee-saved corruption detected, bitmask:", mask)
-        _c_exit(1)
+        raise Error("T9 failed: corruption bitmask " + String(mask))
 
-    print("T9 PASS: d8-d15 (low 64 bits of v8-v15) preserved bit-exactly across ms_ctx_switch; sp 16-aligned at entry and resume")
+    print("T9 PASS: d8-d15 (low 64 bits of v8-v15) preserved bit-exactly across ms_context_switch; sp 16-aligned at entry and resume")

@@ -1,87 +1,93 @@
-# S0-T12 — fresh synthetic-stack context enters and exits cleanly, stack
-# reclaimable without corruption (spec 6.5 / S0-T12; issue #12).
+# S0/M1.4-T12 -- fresh synthetic-stack context enters and exits cleanly,
+# stack reclaimable without corruption (spec 6.5 / S0-T12; issue #12;
+# re-pointed for #128).
 #
-# Drives tests/spike/t12_synth_probe.S (linked into this executable) through
-# the frozen C ABI of include/mojito_spike.h.
+# Drives tests/spike/t12_synth_probe.S (linked directly into this
+# executable, statically -- no dlopen/dlsym) against the PRODUCTION
+# ms_context_switch/ms_context_init, on a NativeStack.
 #
-# Scenario: allocate a fresh guarded stack, ms_ctx_make + ms_ctx_switch into
-# a context whose entry writes sentinel patterns into a heap scratch block
-# and into its own stack region just below SP, yields once, resumes, verifies
-# every sentinel at identical addresses, then exits through the defined
-# completion path (final switch back to the scheduler). The driver then frees
-# the stack and allocates an equal-size replacement (t12_reclaim) to prove
-# clean reclaim; the new stack's highest usable byte is write/read verified.
+# Scenario: allocate a fresh guarded stack, ms_context_init + switch into a
+# context whose entry writes sentinel patterns into a heap scratch block
+# and into its own stack region just below SP, then RETURNS through the
+# v3 lifecycle's defined completion path (entry returns -> trampoline
+# fires the (unregistered, here) finish hook, marks the context FINISHED,
+# and tail-switches back to whichever context switched it in last --
+# native/posix/ms_context_aarch64.S's `mjs_ctx_trampoline`). The driver
+# then verifies every sentinel at identical addresses.
 #
-# The spike dylib is dlopen()ed by name; if it is absent the test reports a
-# deterministic RED verdict and exits nonzero.
+# RECLAIM CYCLE, re-derived for NativeStack rather than ms_stack_alloc/
+# ms_stack_free: the original S0 probe called the spike's own
+# alloc/free pair from a C helper (`t12_reclaim`) to prove a freed stack's
+# address range is cleanly reusable. NativeStack owns that same
+# alloc/free pair itself (mmap in .create(), munmap in __del__), so this
+# leg does the equivalent proof directly in Mojo: explicitly drop the
+# first NativeStack via an owned-transfer into a do-nothing function (so
+# __del__/munmap runs at an exact, deterministic point rather than
+# whenever this toolchain's ASAP destruction happens to fire -- see
+# mojito-sys#204), then create a second, same-size NativeStack and prove
+# its highest usable byte is genuinely writable.
+#
+# AOT ONLY: see tests/spike/run_t8_t14.sh / the switch-half PR notes for why
+# (b2 JIT traps the production v3 lifecycle's first switch).
+#
+# KEEP-ALIVE WORKAROUND (mojito-sys#204): see t8_gpr_preservation.mojo's
+# header note. Same fix applied here, plus the explicit owned-transfer-drop
+# described above for the reclaim half.
 
-@extern("dlopen")
-def _c_dlopen(path: Int, mode: Int32) abi("C") -> Int: ...
-
-@extern("exit")
-def _c_exit(code: Int32) abi("C"): ...
-
-@extern("t12_init")
-def _t12_init() abi("C") -> Int32: ...
-
-@extern("t12_alloc")
-def _t12_alloc(num_bytes: Int) abi("C") -> Int: ...
-
-@extern("t12_free")
-def _t12_free() abi("C"): ...
+from native_stack import NativeStack, page_size
 
 @extern("t12_run")
-def _t12_run(top: Int) abi("C") -> Int: ...
+def _t12_run(stack_low: Int, stack_top: Int) abi("C") -> Int: ...
 
-@extern("t12_reclaim")
-def _t12_reclaim() abi("C") -> Int32: ...
 
-def _addr_of(s: String) -> Int:
-    var buf = InlineArray[Byte, 128](fill=Byte(0))
-    var i = 0
-    for ch in s:
-        buf[i] = Byte(ord(ch))
-        i += 1
-    return Int(UnsafePointer(to=buf))
+def _drop(var s: NativeStack):
+    """Consumes `s` by ownership transfer so its destructor (munmap) runs
+    HERE, deterministically, rather than at whatever point this
+    toolchain's ASAP destruction would otherwise pick (mojito-sys#204)."""
+    pass
 
-def main():
-    if _c_dlopen(_addr_of("libmojito_spike.dylib"), 2) == 0:
-        print("T12 RED: cannot dlopen libmojito_spike.dylib - spike implementation absent (issues #8/#9)")
-        _c_exit(1)
-    if _t12_init() != 0:
-        print("T12 RED: required spike symbols not resolvable - implementation incomplete")
-        _c_exit(1)
 
-    var top = _t12_alloc(256 * 1024)
-    if top == 0:
-        print("T12 FAIL: ms_stack_alloc returned no usable stack")
-        _c_exit(1)
+def main() raises:
+    var ps = page_size()
+    var stack = NativeStack.create(256 * 1024, 256 * 1024, ps)
 
-    var mask = _t12_run(top)
-
-    var reclaim = _t12_reclaim()
-    if reclaim == 0:
-        # second reclaim cycle on the already-recycled stack must also work
-        pass
+    var mask = _t12_run(stack.guard_low_address(), stack.top_address())
+    _ = stack.base_address()  # keep-alive: see mojito-sys#204
 
     if mask < 0:
         print("T12 FAIL: probe could not allocate its shared block")
-        _c_exit(1)
+        raise Error("T12 failed: probe allocation")
 
     if mask & 0xFF != 0:
         print("T12 FAIL: heap scratch corrupted across enter/exit, bitmask:", mask & 0xFF)
-        _c_exit(1)
+        raise Error("T12 failed: heap scratch corrupted")
     if (mask >> 8) & 0xFF != 0:
         print("T12 FAIL: own-stack sentinels corrupted across suspend/resume, bits:", (mask >> 8) & 0xFF)
-        _c_exit(1)
+        raise Error("T12 failed: own-stack sentinels corrupted")
     if mask & (1 << 16) != 0:
-        print("T12 FAIL: sp changed across yield/resume round trip")
-        _c_exit(1)
+        print("T12 FAIL: entry never recorded its own sp")
+        raise Error("T12 failed: entry sp not recorded")
     if mask & (1 << 17) != 0:
         print("T12 FAIL: sp not 16-byte aligned at trampoline entry")
-        _c_exit(1)
-    if reclaim != 0:
-        print("T12 FAIL: stack free/realloc cycle failed, code:", reclaim)
-        _c_exit(1)
+        raise Error("T12 failed: trampoline entry misaligned")
+    if mask & (1 << 18) != 0:
+        print("T12 FAIL: completion marker missing/wrong (completion path not exercised)")
+        raise Error("T12 failed: completion marker missing")
+
+    # Reclaim cycle: explicitly free the first stack now (deterministic
+    # drop, not ASAP-dependent -- mojito-sys#204), then allocate a fresh
+    # same-size stack and prove it is genuinely usable.
+    _drop(stack^)
+
+    var stack2 = NativeStack.create(256 * 1024, 256 * 1024, ps)
+    var top2 = stack2.top_address()
+    var p = UnsafePointer[UInt8, MutAnyOrigin](unsafe_from_address=top2 - 1)
+    p[] = 42
+    var readback = Int(p[])
+    _ = stack2.base_address()  # keep-alive: see mojito-sys#204
+
+    if readback != 42:
+        print("T12 FAIL: stack free/realloc cycle failed: top-of-stack byte not read back intact")
+        raise Error("T12 failed: reclaim readback mismatch")
 
     print("T12 PASS: synthetic stack entered and exited through completion path; all sentinels intact; equal-size realloc after free succeeded")
