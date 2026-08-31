@@ -49,12 +49,16 @@ docs/defects/*.mojo               minimal reproducers for every Mojo
                                    compiler defect/gap this leg hit
 ```
 
-One host so far: macOS arm64 (Darwin 25.6.0), Mojo 1.0.0b2 (2cf4d08a),
-homebrew mojolang tap. Linux x86-64 signal comes from this repo's CI
-`suite-linux` job; **no Linux aarch64 CI lane exists in this repo at
-all**, so the AArch64-vs-x86-64 `epoll_event` packing divergence issue
-#124 specifically calls out stays unverified anywhere reachable from
-this repo, not just on this host — flagged, not guessed at.
+Developed on macOS arm64 (Darwin 25.6.0), Mojo 1.0.0b2 (2cf4d08a),
+homebrew mojolang tap — and separately CONFIRMED GREEN on the real CI
+runner (`suite (macOS arm64)`, macos-14, GitHub Actions), not just
+locally. `suite-linux` (x86-64) never gets far enough to run this suite
+at all: `make` itself fails first on a pre-existing, already-documented
+Apple-only wall in `spike/context_switch/aarch64_switch.S`, unrelated to
+this leg. **No Linux aarch64 CI lane exists in this repo at all either**,
+so the AArch64-vs-x86-64 `epoll_event` packing divergence issue #124
+specifically calls out stays unverified anywhere reachable from this
+repo, on any host. See FINDINGS.md's footnote for the exact log line.
 
 ## What's proven, measured on macOS arm64 (see FINDINGS.md for detail)
 
