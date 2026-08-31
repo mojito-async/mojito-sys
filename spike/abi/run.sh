@@ -115,6 +115,33 @@ echo "$matrix" | sed 's/^/  /'
 
 if [ "$failures" -ne 0 ]; then
     printf '%s\n' "$failure_detail"
+    # CI's raw step log for precommit/gate.sh's full-tier run has been
+    # observed to drop most drivers' stdout entirely (confirmed: a run
+    # where the ONLY output between "gate tier: full" and the final
+    # matrix was the matrix itself, for a step that runs 15+ heavy
+    # drivers — not this script's own tail limits, since the fetched log
+    # blob was genuinely complete at its own byte length, not truncated
+    # by the fetch). $GITHUB_STEP_SUMMARY is a separate, non-log-stream
+    # channel GitHub Actions renders directly in the run's UI; write the
+    # full per-lane output there too whenever it exists, so a real CI
+    # failure's actual detail survives even if the raw log does not.
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+        {
+            echo "## spike/abi/run.sh FAILED ($failures lane(s))"
+            echo '```'
+            printf '%s\n' "$failure_detail"
+            echo '```'
+            for f in "$BUILD_DIR"/*.out; do
+                [ -f "$f" ] || continue
+                echo "<details><summary>$(basename "$f") — full raw output</summary>"
+                echo ""
+                echo '```'
+                cat "$f"
+                echo '```'
+                echo "</details>"
+            done
+        } >> "$GITHUB_STEP_SUMMARY"
+    fi
     echo "RESULT: $failures FAILED"
     exit 1
 fi
