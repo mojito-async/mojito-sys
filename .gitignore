@@ -11,6 +11,7 @@ tests/spike/.build/
 # Spike local outputs
 spike/context_switch/out/
 spike/context_switch/*.log
+spike/abi/.build/
 
 # Tooling
 .max_cache/
