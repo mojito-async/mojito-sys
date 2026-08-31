@@ -87,6 +87,8 @@ jobs:
           key: mojito-sys-build-${{ runner.os }}-${{ hashFiles('Makefile', 'native/**', 'spike/context_switch/**') }}
       - name: Build
         run: make
+      - name: TEMP DIAGNOSTIC - abi-spike direct output, not gate-truncated (remove before merge, issue #124)
+        run: ./spike/abi/run.sh
       - name: Full suite through the pre-commit gate
         env:
           GH_TOKEN: ${{ github.token }}
