@@ -1,19 +1,31 @@
-# S0-T1 — local-address stability (mojito-sys #11)
+# S0-T1 -- local-address stability (mojito-sys #11, re-pointed for #128)
 #
 # Spec §6.5: record the addresses of stack locals before suspension and verify
 # identical addresses after resumption, across repeated suspend/resume cycles.
+#
+# RE-POINTED (#128, M1.4): this test now switches through the PRODUCTION
+# native/posix/ms_context_aarch64.S `ms_context_switch`, called directly
+# via spike/stack_switch/ctx_direct.mojo (zero C wrapper for the switch
+# itself), on a spike/stack_switch/native_stack.mojo NativeStack (built
+# directly over mmap/mprotect/munmap, no C substrate either) -- not the S0
+# spike's own throwaway spike/context_switch/aarch64_switch.S /
+# native_stack.c. Built AOT (`mojo build`, not `mojo run`): the b2 JIT
+# deterministically traps the production v3 lifecycle's first switch
+# (benchmark/ctx/run.sh; confirmed again independently here). `main_ctx`
+# is self-captured before the first switch, arming it under the v3
+# per-context lifecycle (the S0 v2 backend had no such state machine, so
+# the original version never needed this).
 
 from std.memory import stack_allocation
 
-from mojito_spike import (
+from native_stack import NativeStack, page_size
+from ctx_direct import (
     BytePtr,
-    MS_CTX_SIZE,
+    MS_CONTEXT_SIZE,
     entry_pointer,
-    ms_ctx_make,
-    ms_ctx_switch,
-    ms_page_size,
-    ms_stack_alloc,
-    ms_stack_free,
+    ms_context_make,
+    ms_context_switch,
+    ms_context_capture_self,
 )
 
 comptime STACK_BYTES = 262144
@@ -49,7 +61,7 @@ def alt_entry(ud: BytePtr) abi("C"):
     var i = 0
     while i < YIELD_ROUNDS:
         fp[].resumes_seen = i
-        ms_ctx_switch(fp[].self_ctx, fp[].back_ctx)
+        ms_context_switch(fp[].self_ctx, fp[].back_ctx)
 
         if UnsafePointer[Int, MutAnyOrigin](to=marker) != fp[].marker_addr:
             fp[].addr_mismatch = True
@@ -59,35 +71,42 @@ def alt_entry(ud: BytePtr) abi("C"):
 def main() raises:
     var ok = True
     var reason = "ok"
+    var ps = page_size()
 
-    if ms_page_size() <= 0:
+    if ps <= 0:
         ok = False
-        reason = "ms_page_size() <= 0"
+        reason = "page_size() <= 0"
 
-    var slots = stack_allocation[2, BytePtr]()
-    var rc = ms_stack_alloc(STACK_BYTES, slots, slots + 1)
-    if rc != 0:
-        ok = False
-        reason = "ms_stack_alloc rc=" + String(rc)
+    var stack = NativeStack()
+    if ok:
+        try:
+            stack = NativeStack.create(STACK_BYTES, STACK_BYTES, ps)
+        except e:
+            ok = False
+            reason = "NativeStack.create failed: " + String(e)
 
     if ok:
-        var main_buf = stack_allocation[MS_CTX_SIZE // 8, Int]()
-        var alt_buf = stack_allocation[MS_CTX_SIZE // 8, Int]()
+        var main_buf = stack_allocation[MS_CONTEXT_SIZE // 8, Int]()
+        var alt_buf = stack_allocation[MS_CONTEXT_SIZE // 8, Int]()
         var main_ctx = main_buf.bitcast[Byte]()
         var alt_ctx = alt_buf.bitcast[Byte]()
+        ms_context_capture_self(main_ctx)
 
         var frame = Frame()
         frame.self_ctx = alt_ctx
         frame.back_ctx = main_ctx
         var frame_p = UnsafePointer[Frame, MutAnyOrigin](to=frame).bitcast[Byte]()
 
-        ms_ctx_make(alt_ctx, (slots + 1)[], entry_pointer["t1_alt_entry"](), frame_p)
+        ms_context_make(
+            alt_ctx, stack.guard_low_address(), stack.top_address(),
+            entry_pointer["t1_alt_entry"](), frame_p,
+        )
 
         # Enter; alternate context yields YIELD_ROUNDS times, then returns.
-        ms_ctx_switch(main_ctx, alt_ctx)
+        ms_context_switch(main_ctx, alt_ctx)
         var rounds = 0
         while rounds < YIELD_ROUNDS and not frame.addr_mismatch:
-            ms_ctx_switch(main_ctx, alt_ctx)
+            ms_context_switch(main_ctx, alt_ctx)
             rounds += 1
 
         if frame.resumes_seen != YIELD_ROUNDS - 1:
@@ -102,7 +121,8 @@ def main() raises:
             ok = False
             reason = "stack-local address changed across suspend/resume"
 
-        ms_stack_free(slots[])
+        # `stack` drops here (NativeStack.__del__ releases it exactly once);
+        # no explicit free call needed.
 
     print("T1 local-address stability: " + ("PASS" if ok else "FAIL (" + reason + ")"))
     if not ok:

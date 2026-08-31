@@ -9,14 +9,14 @@
 
 from std.memory import stack_allocation
 
-from mojito_spike import (
+from native_stack import NativeStack, page_size
+from ctx_direct import (
     BytePtr,
-    MS_CTX_SIZE,
+    MS_CONTEXT_SIZE,
     entry_pointer,
-    ms_ctx_make,
-    ms_ctx_switch,
-    ms_stack_alloc,
-    ms_stack_free,
+    ms_context_make,
+    ms_context_switch,
+    ms_context_capture_self,
 )
 
 comptime STACK_BYTES = 262144
@@ -68,7 +68,7 @@ def guarded_phase(fp: UnsafePointer[Frame, MutAnyOrigin]) raises:
     var r = Resource(fp[].counters)
     failing_chain(3)
     fp[].yields_seen += 1  # must never run
-    ms_ctx_switch(fp[].self_ctx, fp[].back_ctx)  # must never run
+    ms_context_switch(fp[].self_ctx, fp[].back_ctx)  # must never run
 
 
 @export("t5_alt_entry")
@@ -79,23 +79,27 @@ def alt_entry(ud: BytePtr) abi("C"):
     except e:
         fp[].error_message = String(e)
     # Hand control back one last time; main treats this as completion.
-    ms_ctx_switch(fp[].self_ctx, fp[].back_ctx)
+    ms_context_switch(fp[].self_ctx, fp[].back_ctx)
 
 
 def main() raises:
     var ok = True
     var reason = "ok"
 
-    var slots = stack_allocation[2, BytePtr]()
-    if ms_stack_alloc(STACK_BYTES, slots, slots + 1) != 0:
+    var ps = page_size()
+    var stack = NativeStack()
+    try:
+        stack = NativeStack.create(STACK_BYTES, STACK_BYTES, ps)
+    except e:
         ok = False
-        reason = "ms_stack_alloc failed"
+        reason = "NativeStack.create failed: " + String(e)
 
     if ok:
-        var main_buf = stack_allocation[MS_CTX_SIZE // 8, Int]()
-        var alt_buf = stack_allocation[MS_CTX_SIZE // 8, Int]()
+        var main_buf = stack_allocation[MS_CONTEXT_SIZE // 8, Int]()
+        var alt_buf = stack_allocation[MS_CONTEXT_SIZE // 8, Int]()
         var main_ctx = main_buf.bitcast[Byte]()
         var alt_ctx = alt_buf.bitcast[Byte]()
+        ms_context_capture_self(main_ctx)
 
         var cs = Counters()
         var frame = Frame()
@@ -104,9 +108,12 @@ def main() raises:
         frame.counters = UnsafePointer[Counters, MutAnyOrigin](to=cs)
         var frame_p = UnsafePointer[Frame, MutAnyOrigin](to=frame).bitcast[Byte]()
 
-        ms_ctx_make(alt_ctx, (slots + 1)[], entry_pointer["t5_alt_entry"](), frame_p)
+        ms_context_make(
+            alt_ctx, stack.guard_low_address(), stack.top_address(),
+            entry_pointer["t5_alt_entry"](), frame_p,
+        )
         # Single entry: ALT errors before yielding and hands straight back.
-        ms_ctx_switch(main_ctx, alt_ctx)
+        ms_context_switch(main_ctx, alt_ctx)
 
         if frame.error_message != "pre-yield-failure":
             ok = False
@@ -125,7 +132,8 @@ def main() raises:
                 + String(cs.dtor)
             )
 
-        ms_stack_free(slots[])
+        # `stack` drops here (NativeStack.__del__ releases it exactly
+        # once); no explicit free call needed.
 
     print("T5 raises-before-yield cleanup: " + ("PASS" if ok else "FAIL (" + reason + ")"))
     if not ok:

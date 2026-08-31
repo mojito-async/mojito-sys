@@ -9,14 +9,14 @@
 
 from std.memory import stack_allocation
 
-from mojito_spike import (
+from native_stack import NativeStack, page_size
+from ctx_direct import (
     BytePtr,
-    MS_CTX_SIZE,
+    MS_CONTEXT_SIZE,
     entry_pointer,
-    ms_ctx_make,
-    ms_ctx_switch,
-    ms_stack_alloc,
-    ms_stack_free,
+    ms_context_make,
+    ms_context_switch,
+    ms_context_capture_self,
 )
 
 comptime STACK_BYTES = 262144
@@ -52,7 +52,7 @@ def alt_entry(ud: BytePtr) abi("C"):
         if local_acc != i * (i + 1) // 2:
             fp[].mismatch = True
         fp[].rounds_completed = i
-        ms_ctx_switch(fp[].self_ctx, fp[].back_ctx)
+        ms_context_switch(fp[].self_ctx, fp[].back_ctx)
         i += 1
 
 
@@ -60,28 +60,35 @@ def main() raises:
     var ok = True
     var reason = "ok"
 
-    var slots = stack_allocation[2, BytePtr]()
-    if ms_stack_alloc(STACK_BYTES, slots, slots + 1) != 0:
+    var ps = page_size()
+    var stack = NativeStack()
+    try:
+        stack = NativeStack.create(STACK_BYTES, STACK_BYTES, ps)
+    except e:
         ok = False
-        reason = "ms_stack_alloc failed"
+        reason = "NativeStack.create failed: " + String(e)
 
     if ok:
-        var main_buf = stack_allocation[MS_CTX_SIZE // 8, Int]()
-        var alt_buf = stack_allocation[MS_CTX_SIZE // 8, Int]()
+        var main_buf = stack_allocation[MS_CONTEXT_SIZE // 8, Int]()
+        var alt_buf = stack_allocation[MS_CONTEXT_SIZE // 8, Int]()
         var main_ctx = main_buf.bitcast[Byte]()
         var alt_ctx = alt_buf.bitcast[Byte]()
+        ms_context_capture_self(main_ctx)
 
         var frame = Frame()
         frame.self_ctx = alt_ctx
         frame.back_ctx = main_ctx
         var frame_p = UnsafePointer[Frame, MutAnyOrigin](to=frame).bitcast[Byte]()
 
-        ms_ctx_make(alt_ctx, (slots + 1)[], entry_pointer["t6_alt_entry"](), frame_p)
+        ms_context_make(
+            alt_ctx, stack.guard_low_address(), stack.top_address(),
+            entry_pointer["t6_alt_entry"](), frame_p,
+        )
 
         # Mutable MAIN-stack state, checked every iteration.
         var main_acc: Int = 0
 
-        ms_ctx_switch(main_ctx, alt_ctx)  # enter ALT (it completes round 1)
+        ms_context_switch(main_ctx, alt_ctx)  # enter ALT (it completes round 1)
         var i = 1
         while i <= ITERATIONS:
             if frame.rounds_completed != i:
@@ -105,14 +112,15 @@ def main() raises:
                 reason = "alternate context reported mismatch at iteration " + String(i)
                 break
             if i < ITERATIONS:
-                ms_ctx_switch(main_ctx, alt_ctx)
+                ms_context_switch(main_ctx, alt_ctx)
             i += 1
 
         if frame.rounds_completed != ITERATIONS:
             ok = False
             reason = "final rounds=" + String(frame.rounds_completed)
 
-        ms_stack_free(slots[])
+        # `stack` drops here (NativeStack.__del__ releases it exactly
+        # once); no explicit free call needed.
 
     print(
         "T6 repeated switching ("
