@@ -1,0 +1,51 @@
+{"kind":"struct","name":"mjs_sockaddr","source":"native/include/mojito_sys.h","public":true,"size":136,"align":4,"fields":[{"name":"family","offset":0,"size":4},{"name":"port","offset":4,"size":2},{"name":"_pad0","offset":6,"size":2},{"name":"flowinfo","offset":8,"size":4},{"name":"scope_id","offset":12,"size":4},{"name":"octets","offset":16,"size":16},{"name":"path","offset":32,"size":104}]}
+{"kind":"struct","name":"mjs_poll_event","source":"native/include/mojito_sys.h","public":true,"size":16,"align":8,"fields":[{"name":"token","offset":0,"size":8},{"name":"fd","offset":8,"size":4},{"name":"events","offset":12,"size":4}]}
+{"kind":"struct","name":"mjs_callback_token","source":"native/include/mojito_sys.h","public":true,"size":16,"align":8,"fields":[{"name":"addr","offset":0,"size":8},{"name":"userdata","offset":8,"size":8}]}
+{"kind":"opaque","name":"ms_context","source":"native/include/mojito_sys.h (opaque; layout private to native/posix/ms_context.c)","public":true,"size":200,"align":8,"note":"size/alignment via ms_context_size()/ms_context_alignment() at runtime; internal field offsets are pinned by _Static_assert in ms_context.c (regs@0 fps@96 sp@160 state@168 ret_to@176 finish_cb@184 finish_ud@192, 200 bytes total) and are package-private, not re-measured here"}
+{"kind":"opaque","name":"mjs_thread*","source":"native/include/mojito_sys.h","public":true,"size":8,"align":8,"note":"opaque handle slot"}
+{"kind":"opaque","name":"mjs_mutex*","source":"native/include/mojito_sys.h","public":true,"size":8,"align":8,"note":"opaque handle slot"}
+{"kind":"opaque","name":"mjs_condvar*","source":"native/include/mojito_sys.h","public":true,"size":8,"align":8,"note":"opaque handle slot"}
+{"kind":"opaque","name":"mjs_event*","source":"native/include/mojito_sys.h","public":true,"size":8,"align":8,"note":"opaque handle slot"}
+{"kind":"opaque","name":"mjs_sem*","source":"native/include/mojito_sys.h","public":true,"size":8,"align":8,"note":"opaque handle slot"}
+{"kind":"opaque","name":"mjs_poller*","source":"native/include/mojito_sys.h","public":true,"size":8,"align":8,"note":"opaque handle slot"}
+{"kind":"opaque","name":"mjs_epoller*","source":"native/include/mojito_sys.h","public":true,"size":8,"align":8,"note":"opaque handle slot"}
+{"kind":"opaque","name":"mjs_uring*","source":"native/include/mojito_sys.h","public":true,"size":8,"align":8,"note":"opaque handle slot"}
+{"kind":"function_pointer","name":"ms_callback","source":"native/include/mojito_sys.h","public":true,"size":8,"align":8}
+{"kind":"function_pointer","name":"ms_thread_entry","source":"native/include/mojito_sys.h","public":true,"size":8,"align":8}
+{"kind":"function_pointer","name":"ms_context_entry","source":"native/include/mojito_sys.h","public":true,"size":8,"align":8}
+{"kind":"function_pointer","name":"ms_context_finish_fn","source":"native/include/mojito_sys.h","public":true,"size":8,"align":8}
+{"kind":"constant","name":"MOJITO_SYS_ABI_VERSION","source":"native/include/mojito_sys.h","public":true,"value":1}
+{"kind":"constant","name":"MJS_PROT_NONE","source":"native/include/mojito_sys.h","public":true,"value":0}
+{"kind":"constant","name":"MJS_PROT_READ","source":"native/include/mojito_sys.h","public":true,"value":1}
+{"kind":"constant","name":"MJS_PROT_WRITE","source":"native/include/mojito_sys.h","public":true,"value":2}
+{"kind":"constant","name":"MJS_PROT_EXEC","source":"native/include/mojito_sys.h","public":true,"value":4}
+{"kind":"constant","name":"MJS_SOCK_STREAM","source":"native/include/mojito_sys.h","public":true,"value":1}
+{"kind":"constant","name":"MJS_SOCK_DGRAM","source":"native/include/mojito_sys.h","public":true,"value":2}
+{"kind":"constant","name":"MJS_SOCK_INET","source":"native/include/mojito_sys.h","public":true,"value":2}
+{"kind":"constant","name":"MJS_SOCK_UNIX","source":"native/include/mojito_sys.h","public":true,"value":1}
+{"kind":"constant","name":"MJS_SOCK_INET6","source":"native/include/mojito_sys.h","public":true,"value":30}
+{"kind":"constant","name":"MJS_SHUT_READ","source":"native/include/mojito_sys.h","public":true,"value":0}
+{"kind":"constant","name":"MJS_SHUT_WRITE","source":"native/include/mojito_sys.h","public":true,"value":1}
+{"kind":"constant","name":"MJS_SHUT_BOTH","source":"native/include/mojito_sys.h","public":true,"value":2}
+{"kind":"constant","name":"MJS_POLL_READABLE","source":"native/include/mojito_sys.h","public":true,"value":1}
+{"kind":"constant","name":"MJS_POLL_WRITABLE","source":"native/include/mojito_sys.h","public":true,"value":2}
+{"kind":"constant","name":"MJS_POLL_EOF","source":"native/include/mojito_sys.h","public":true,"value":4}
+{"kind":"constant","name":"MJS_POLL_ERROR","source":"native/include/mojito_sys.h","public":true,"value":8}
+{"kind":"constant","name":"AF_INET (os)","source":"native/include/mojito_sys.h","public":true,"value":2}
+{"kind":"constant","name":"AF_INET6 (os)","source":"native/include/mojito_sys.h","public":true,"value":30}
+{"kind":"constant","name":"AF_UNIX (os)","source":"native/include/mojito_sys.h","public":true,"value":1}
+{"kind":"struct","name":"struct timespec","source":"<time.h>","public":false,"size":16,"align":8,"fields":[{"name":"tv_sec","offset":0,"size":8},{"name":"tv_nsec","offset":8,"size":8}]}
+{"kind":"struct","name":"struct timeval","source":"<sys/time.h>","public":false,"size":16,"align":8,"fields":[{"name":"tv_sec","offset":0,"size":8},{"name":"tv_usec","offset":8,"size":4}]}
+{"kind":"struct","name":"struct sockaddr_in","source":"<netinet/in.h>","public":false,"size":16,"align":4,"fields":[{"name":"sin_len","offset":0,"size":1},{"name":"sin_family","offset":1,"size":1},{"name":"sin_port","offset":2,"size":2},{"name":"sin_addr","offset":4,"size":4}]}
+{"kind":"struct","name":"struct sockaddr_in6","source":"<netinet/in.h>","public":false,"size":28,"align":4,"fields":[{"name":"sin6_len","offset":0,"size":1},{"name":"sin6_family","offset":1,"size":1},{"name":"sin6_port","offset":2,"size":2},{"name":"sin6_flowinfo","offset":4,"size":4},{"name":"sin6_addr","offset":8,"size":16},{"name":"sin6_scope_id","offset":24,"size":4}]}
+{"kind":"struct","name":"struct sockaddr_un","source":"<sys/un.h>","public":false,"size":106,"align":1,"fields":[{"name":"sun_len","offset":0,"size":1},{"name":"sun_family","offset":1,"size":1},{"name":"sun_path","offset":2,"size":104}]}
+{"kind":"typedef","name":"sa_family_t","source":"<sys/socket.h>","public":false,"size":1,"align":1}
+{"kind":"typedef","name":"socklen_t","source":"<sys/socket.h>","public":false,"size":4,"align":4}
+{"kind":"struct","name":"struct iovec","source":"<sys/uio.h>","public":false,"size":16,"align":8,"fields":[{"name":"iov_base","offset":0,"size":8},{"name":"iov_len","offset":8,"size":8}]}
+{"kind":"struct","name":"struct kevent","source":"<sys/event.h> (BSD/macOS only)","public":false,"size":32,"align":4,"fields":[{"name":"ident","offset":0,"size":8},{"name":"filter","offset":8,"size":2},{"name":"flags","offset":10,"size":2},{"name":"fflags","offset":12,"size":4},{"name":"data","offset":16,"size":8},{"name":"udata","offset":24,"size":8}]}
+{"kind":"unmeasured","name":"struct epoll_event","source":"<sys/epoll.h> (Linux only)","reason":"epoll is Linux-only and this oracle is running on a non-Linux host; struct epoll_event is notoriously __attribute__((packed)) on x86-64 and NOT packed on AArch64 (see native/posix/mjs_epoll.c and issue #124's own callout) — measure on both a Linux/x86-64 and a Linux/AArch64 host via the M1.2 spike leg (#124), not assumed from this run"}
+{"kind":"opaque","name":"pthread_attr_t","source":"<pthread.h>","public":false,"size":64,"align":8,"note":"opaque libc blob; contents are never inspected, only sized for pthread_attr_init storage"}
+{"kind":"opaque","name":"pthread_mutex_t","source":"<pthread.h>","public":false,"size":64,"align":8,"note":"opaque libc blob; wrapped by native/posix/mjs_mutex.c / mjs_sync_internal.h"}
+{"kind":"opaque","name":"pthread_cond_t","source":"<pthread.h>","public":false,"size":48,"align":8,"note":"opaque libc blob; wrapped by native/posix/mjs_condvar.c"}
+{"kind":"opaque","name":"pthread_key_t","source":"<pthread.h>","public":false,"size":8,"align":8,"note":"opaque libc scalar; wrapped by native/posix/mjs_tls.c's validated registry"}
+{"kind":"opaque","name":"pthread_t","source":"<pthread.h>","public":false,"size":8,"align":8,"note":"opaque libc handle; wrapped by native/posix/mjs_thread.c (struct mjs_thread.pt)"}
