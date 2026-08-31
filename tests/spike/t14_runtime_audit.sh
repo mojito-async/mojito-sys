@@ -1,60 +1,85 @@
 #!/bin/sh
-# t14_runtime_audit.sh — S0-T14: Mojo runtime-independence audit (spec 6.5).
+# t14_runtime_audit.sh — S0/M1.4-T14: Mojo runtime-independence audit
+# (spec 6.5; issue #12; re-pointed for #128).
 #
-# Owner: tests lane B (issue #12). Verifies that the spike's compiled
-# artifact libmojito_spike.dylib references NO private Modular/Mojo
-# async/coroutine/compiler-runtime symbols, per spec constraint "no private
-# Mojo async/coroutine/runtime symbols" and CONTRACT.md "public Mojo
-# facilities only above the C ABI".
+# RE-POINTED (#128): the S0 spike's own throwaway libmojito_spike.dylib is
+# gone from this leg's switch half -- T8-T13 link the PRODUCTION
+# native/posix/ms_context.c + ms_context_aarch64.S directly into each Mojo
+# AOT binary (no dylib in the loop at all for them). The artifact worth
+# auditing for "no private Mojo/Modular runtime symbols leaked" is
+# therefore the production ms_context object pair itself: this script
+# builds a small, single-purpose dylib from EXACTLY those two files (never
+# linked against any Mojo runtime, so if this audit ever finds a private
+# Mojo/Modular symbol here, that would be a genuinely alarming result, not
+# a rebuild-and-retry flake) and audits that.
+#
+# This is DELIBERATELY narrower than auditing the full libmojito_sys.dylib
+# (built by the repo-root Makefile from every native/*.c and native/*.S):
+# that library also carries io_uring/epoll/socket/thread/sync code
+# entirely outside this leg's scope, whose own symbol surface belongs to
+# the lanes that own it. Scoping this audit to exactly the two files this
+# leg's switch half depends on keeps the allow-list honest and avoids
+# masking a real finding under an allow-list broadened for unrelated
+# lanes.
 #
 # Method:
-#   1. Locate the dylib ($MOJITO_SPIKE_DYLIB overrides; else common paths).
+#   1. Build libms_context_audit.dylib from native/posix/ms_context.c and
+#      native/posix/ms_context_aarch64.S (CC overrides the compiler).
 #   2. `nm -u` its undefined symbols; every symbol must be either a system
-#      library symbol or a public mojito_spike/ms_* symbol. (Plain `nm -u`:
-#      on Apple llvm-nm `-u -U` cancel out and would yield an empty, vacuous
-#      audit.)
+#      library symbol or the public ms_context_* ABI.
 #   3. `nm -gU --defined-only` its exported symbols; nothing private may be
-#      exported either.
+#      exported either -- in particular, mjs__ctx_make_raw and
+#      mjs_ctx_trampoline (.private_extern in the .S) must NOT appear here;
+#      if they do, something about the build stopped that linkage
+#      visibility contract from taking effect.
 #   4. Screening order per symbol: the private-runtime pattern is applied
-#      FIRST — a match is FORBIDDEN regardless of allow status. Symbols that
-#      match neither the allow-list nor the private pattern are reported as
-#      UNAUDITED[...] warnings instead of being silently dropped.
+#      FIRST — a match is FORBIDDEN regardless of allow status. Symbols
+#      that match neither the allow-list nor the private pattern are
+#      reported as UNAUDITED[...] warnings instead of being silently
+#      dropped.
 #
-# Exit codes: 0 pass | 1 forbidden symbols found | 2 RED: dylib absent |
+# Exit codes: 0 pass | 1 forbidden symbols found | 2 RED: build failed |
 #             3 tooling error.
 set -u
 
-repo=$(cd "$(dirname "$0")/../.." && pwd)
-lib="${MOJITO_SPIKE_DYLIB:-}"
-if [ -z "$lib" ]; then
-    for cand in \
-        "$repo/spike/context_switch/libmojito_spike.dylib" \
-        "$repo/libmojito_spike.dylib" \
-        "$repo/build/libmojito_spike.dylib"; do
-        if [ -f "$cand" ]; then
-            lib="$cand"
-            break
-        fi
-    done
-fi
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+CC=${CC:-cc}
+OUT="$SCRIPT_DIR/.build"
+mkdir -p "$OUT"
 
-if [ -z "${lib:-}" ] || [ ! -f "$lib" ]; then
-    echo "T14 RED: libmojito_spike.dylib not found — spike implementation absent (issues #8/#9)."
-    echo "T14 RED: build it first (make in spike/context_switch/) or set MOJITO_SPIKE_DYLIB."
+command -v "$CC" >/dev/null 2>&1 || { echo "T14 ERROR: $CC not found; set CC=<compiler>"; exit 3; }
+command -v nm >/dev/null 2>&1 || { echo "T14 ERROR: nm not available"; exit 3; }
+
+if ! "$CC" -arch arm64 -O2 -I "$repo/native/include" -c "$repo/native/posix/ms_context.c" -o "$OUT/t14_ms_context.o" 2>"$OUT/t14_ms_context.err"; then
+    echo "T14 RED: failed to build native/posix/ms_context.c:"
+    sed 's/^/  /' "$OUT/t14_ms_context.err"
+    exit 2
+fi
+if ! "$CC" -arch arm64 -c "$repo/native/posix/ms_context_aarch64.S" -o "$OUT/t14_ms_context_aarch64.o" 2>"$OUT/t14_ms_context_aarch64.err"; then
+    echo "T14 RED: failed to build native/posix/ms_context_aarch64.S:"
+    sed 's/^/  /' "$OUT/t14_ms_context_aarch64.err"
+    exit 2
+fi
+lib="$OUT/libms_context_audit.dylib"
+if ! "$CC" -dynamiclib -o "$lib" "$OUT/t14_ms_context.o" "$OUT/t14_ms_context_aarch64.o" 2>"$OUT/t14_link.err"; then
+    echo "T14 RED: failed to link the audit dylib:"
+    sed 's/^/  /' "$OUT/t14_link.err"
     exit 2
 fi
 
-echo "T14: auditing $lib"
-
-command -v nm >/dev/null 2>&1 || { echo "T14 ERROR: nm not available"; exit 3; }
-
-undef=$(nm -uU "$lib" 2>/dev/null) || { echo "T14 ERROR: nm -uU failed"; exit 3; }
-defined=$(nm -gU --defined-only "$lib" 2>/dev/null) || { echo "T14 ERROR: nm failed on defined symbols"; exit 3; }
+echo "T14: auditing $lib (native/posix/ms_context.c + ms_context_aarch64.S only)"
 
 undef=$(nm -u "$lib" 2>/dev/null) || { echo "T14 ERROR: nm -u failed"; exit 3; }
-# Symbols the spike is allowed to import: libc/libSystem/pthread/mach/dyld
-# surface plus its own public ABI.
-allow='^_?(ms_|mach_|pthread|os_|dispatch|malloc|free|calloc|realloc|posix_memalign|mem[a-z]*$|str[a-z]*$|bzero|bcmp|close|open|read|write|mmap|munmap|mprotect|madvise|msync|mincore|sysconf|getpagesize|exit|abort|__stack_chk_|dyld|objc|swift|kCF|CF[A-Z]|NS[a-z]|__error|fprintf|stderrp|stdoutp|stdinp)'
+defined=$(nm -gU --defined-only "$lib" 2>/dev/null) || { echo "T14 ERROR: nm failed on defined symbols"; exit 3; }
+
+# Symbols this audit target is allowed to import: libc/libSystem surface
+# plus its own public ms_context_* ABI. (No mjs_/mach_/pthread/etc needed
+# here -- unlike the S0 spike or the full libmojito_sys.dylib, these two
+# files only ever call memset-shaped compiler builtins, which -O2 inlines
+# away for this fixed 200-byte struct, so the undefined-symbol list is
+# expected to be empty in practice.)
+allow='^_?(ms_context_|mem[a-z]*$|str[a-z]*$|bzero|bcmp|__stack_chk_|__error)'
 private='_MLIR|__mlir|[Mm][Ll][Ii][Rr]|modart|[Aa]sync[Rr][Tt]|asyncrt|__mojo|_mojo|kgen|[Kk]gen|[Cc]oroutine|COROUTINE'
 check_list() {
     _list="$1"
@@ -85,5 +110,14 @@ if [ -n "$forbidden" ]; then
     exit 1
 fi
 
-echo "T14 PASS: no private Mojo async/coroutine/runtime symbols referenced or exported."
+# Belt+suspenders: mjs__ctx_make_raw and mjs_ctx_trampoline are
+# .private_extern in the .S specifically so they never become part of a
+# linked artifact's public surface. Confirm that directly rather than only
+# relying on the allow/private pattern screen above.
+if printf '%s\n' "$defined" | grep -q 'mjs__ctx_make_raw\|mjs_ctx_trampoline'; then
+    echo "T14 FAIL: mjs__ctx_make_raw/mjs_ctx_trampoline are exported -- .private_extern did not take effect"
+    exit 1
+fi
+
+echo "T14 PASS: no private Mojo async/coroutine/runtime symbols referenced or exported; mjs__ctx_make_raw/mjs_ctx_trampoline stay non-exported as designed."
 exit 0
