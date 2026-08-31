@@ -6,7 +6,7 @@
  *
  *   1. STRUCT LAYOUT ORACLE. For every OS struct issue #124 names
  *      (timespec, timeval, sockaddr_in/in6/un, iovec, kevent (BSD/macOS),
- *      epoll_event (Linux), plus the opaque pthread_attr_t/pthread_mutex_t
+ *      epoll_event (Linux), plus the opaque pthread_attr_t/pthread_mutex_
  *      blobs) this exposes:
  *        - oracle_sizeof_X() / oracle_alignof_X() — this compiler's real
  *          numbers, evaluated with sizeof/_Alignof, never hand-copied;
@@ -37,7 +37,7 @@
  *      through its own C-side `errno` for the SAME failing call).
  *
  * Every number this file reports is measured on THIS host by THIS
- * compiler. Nothing here is copied from MOJO_MIGRATION_BASELINE.md — that
+ * compiler. Nothing here is copied from MOJO_MIGRATION_BASELINE.md — tha
  * document itself says its Linux column for platform-divergent values is
  * NOT measured and flags itself as such; this oracle is what measures the
  * real thing, on whichever host runs it (this repo's CI runs it on both
@@ -56,6 +56,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stddef.h> /* offsetof() - do not rely on a transitive include; an
+                    * older SDK (confirmed: CI's macos-14 runner, Xcode clang) does
+                    * NOT pull this in through any of the other headers below,
+                    * unlike this dev host's newer SDK, where it happened to
+                    * already be visible transitively and masked the bug locally. */
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -567,7 +572,7 @@ size_t oracle_alignof_pthread_mutex_t(void) {
 }
 
 /* Dynamic proof that the reported size is genuinely enough storage for
- * the real libc to use: init a real pthread_attr_t / pthread_mutex_t
+ * the real libc to use: init a real pthread_attr_t / pthread_mutex_
  * into caller-sized-and-aligned storage (mirroring how Mojo would
  * allocate an opaque blob) and destroy it. Returns 0 on success. */
 int oracle_pthread_attr_roundtrip(void *storage, size_t cap) {
