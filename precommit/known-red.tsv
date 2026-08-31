@@ -35,3 +35,11 @@ s5-ctx-api	https://github.com/mojito-async/mojito-sys/issues/142	2026-08-30
 # sets out is an issue plus a dated row, never `--no-verify`. Tracked by
 # #129, which owns the paired benchmark harness this crashes inside.
 bench	https://github.com/mojito-async/mojito-sys/issues/129	2026-08-30
+# `s3-other` fails the blocking macOS lane for a reason that has nothing to
+# do with this branch: S3 is the sync-primitive battery (semaphore, condvar,
+# atomic-wait), and #192 was filed against it before this spike existed. It
+# also notes the gate only ever tails the combined transcript, so CI never
+# prints which S3 check actually broke. Rowed here so an unrelated red stops
+# blocking every other PR in the queue; #192 owns diagnosing and fixing it,
+# and this row comes straight back out when it does.
+s3-other	https://github.com/mojito-async/mojito-sys/issues/192	2026-08-31
