@@ -13,6 +13,18 @@
 #   CC=<cc>              override the C compiler
 #
 # Prints a PASS/FAIL matrix and exits nonzero if any lane fails.
+#
+# NOTE ON OUTPUT ORDERING: precommit/run-suite.sh's own run_driver wraps
+# THIS whole script's stdout and keeps only the LAST 20 lines for its own
+# CI log. A lane's full detail printed immediately after it runs would be
+# buried under later lanes' output and lost in CI. So this script instead
+# prints only a one-line PASS/FAIL per lane as it runs, and holds a dense
+# excerpt (the failing check lines + last few lines of raw output) for
+# each FAILING lane back — printing it in one block at the very end,
+# right before the final RESULT line, so it is what survives any outer
+# truncation. Each lane's COMPLETE raw output is also written to
+# .build/<lane>.out for local debugging (gitignored, not part of CI's
+# captured log).
 
 set -u
 
@@ -39,6 +51,7 @@ fi
 
 failures=0
 matrix=""
+failure_detail=""
 
 # run_lane <name> <file> <needs-dylib: 0|1>
 run_lane() {
@@ -65,27 +78,43 @@ run_lane() {
         fi
     done
 
-    echo "== $name"
-    printf '%s\n' "$out" | tail -n 15 | sed 's/^/   | /'
+    printf '%s\n' "$out" > "$BUILD_DIR/$name.out" 2>/dev/null || true
 
     if [ $status -eq 0 ] && printf '%s' "$out" | grep -q "RESULT: all green"; then
+        echo "== $name PASS (attempt $attempt)"
         matrix="$matrix$name PASS
 "
     else
+        echo "== $name FAIL (attempt $attempt, exit $status) — detail held for the end"
         matrix="$matrix$name FAIL
 "
         failures=$((failures + 1))
+        # precommit/run-suite.sh's own run_driver keeps only the LAST 20
+        # lines of this whole script's stdout for its CI log, so a dense
+        # "which checks actually failed" excerpt (not the full output,
+        # which could be 50-90 lines for one lane alone) is what has to
+        # survive that truncation. Grep for FAIL lines specifically, plus
+        # the tail of the raw output for any crash/traceback context.
+        fail_lines=$(printf '%s\n' "$out" | grep -i "FAIL\|error\|Stack dump\|Unhandled exception" | head -n 12)
+        failure_detail="$failure_detail
+---- $name FAILED (exit $status) — failing checks ----
+$fail_lines
+---- $name — last 8 lines of raw output ----
+$(printf '%s\n' "$out" | tail -n 8)
+"
     fi
-    echo ""
 }
 
 run_lane "struct-layout"    "struct_layout_test.mojo"   1
 run_lane "libc-calls"       "libc_calls_test.mojo"      1
 run_lane "ordinary-frame"   "ordinary_frame_test.mojo"  0
 
+echo ""
 echo "M1.2 abi spike matrix (issue #124)"
 echo "$matrix" | sed 's/^/  /'
+
 if [ "$failures" -ne 0 ]; then
+    printf '%s\n' "$failure_detail"
     echo "RESULT: $failures FAILED"
     exit 1
 fi
