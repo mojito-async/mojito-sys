@@ -110,6 +110,7 @@ fi
 
 if [ "$TIER" = "affected" ]; then
     touches "tests/spike/" && { run_driver t1-t7 make test; run_driver t8-t14 ./tests/spike/run_t8_t14.sh; }
+    touches "spike/abi/" && run_driver abi-spike ./spike/abi/run.sh
     touches "benchmark/" && run_driver bench make bench
     touches "tests/s1/" && run_driver s1-tests make test-s1
     if touches "tests/s2/"; then
@@ -136,6 +137,12 @@ fi
 # --- full tier (default) ----------------------------------------------------
 run_driver t1-t7            make test
 run_driver t8-t14           ./tests/spike/run_t8_t14.sh
+# M1.2 abi spike (issue #124): struct-layout half, libc-call half, and
+# the leaf-module-constraint probe. No -Xlinker dependency on the
+# packaged libmojito_sys.dylib — spike/abi/run.sh builds its own oracle
+# dylib from spike/abi/oracle.c ad hoc, same convention as
+# tests/s1/memory/vm/run.sh.
+run_driver abi-spike        ./spike/abi/run.sh
 run_driver bench            make bench
 run_driver s1-tests         make test-s1
 run_driver s2-tests         make test-s2
