@@ -3,7 +3,27 @@
 Measured results against issue #124's acceptance criteria. Everything
 below is a real, dynamically-verified result on macOS arm64 (Darwin
 25.6.0, Mojo 1.0.0b2 2cf4d08a, homebrew mojolang tap) unless marked
-CI-pending or explicitly unverified. Re-run: `cd spike/abi && ./run.sh`.
+BLOCKED¹ or explicitly unverified. Re-run: `cd spike/abi && ./run.sh`.
+
+**CI status (verified, not just local):** `suite (macOS arm64)`
+(blocking) runs `spike/abi/run.sh` for real on GitHub Actions and it is
+GREEN there — confirmed on the actual macos-14 runner, not assumed from
+a local pass. One real CI-only bug surfaced and got fixed along the way:
+`oracle.c` used `offsetof()` without including `<stddef.h>`; this dev
+host's SDK pulls it in transitively through another header and masked
+the bug locally, while CI's macos-14 SDK does not. Fixed by adding the
+include directly (never rely on a transitive one).
+
+¹ **BLOCKED, not merely pending:** `suite (Linux x86-64)` fails
+`make` itself before any test runs, including this one — confirmed
+directly in that job's log: `spike/context_switch/aarch64_switch.S:33:2:
+error: #error "aarch64_switch.S targets Apple arm64 (Mach-O) only"`.
+This is a pre-existing, already-documented condition of this repo's CI
+(`.github/workflows/ci.yml`'s own comments call it out) that has nothing
+to do with this leg or this PR — the S0 spike lane a plain `make`
+always builds is Apple-arm64-only, so nothing past that point, mine
+included, has ever run on Linux CI here. Every Linux x86-64 row below is
+therefore genuinely unverified, not just "hasn't reported back yet."
 
 ## Half 1 — struct layout
 
@@ -16,17 +36,17 @@ rather than skipped."
 
 | Struct | macOS arm64 | Linux x86-64 (CI) | Linux AArch64 |
 |---|---|---|---|
-| `timespec` | size+offsets+round-trip: PASS | CI-pending | no CI lane, unverified |
-| `timeval` | size+offsets+round-trip: PASS (tv_usec width measured: 4 bytes darwin) | CI-pending (Linux branch coded, tv_usec: 8 bytes, unverified locally) | no CI lane, unverified |
-| `sockaddr_in` | size+offsets+round-trip: PASS | CI-pending | no CI lane, unverified |
-| `sockaddr_in6` | size+offsets+round-trip: PASS | CI-pending | no CI lane, unverified |
-| `sockaddr_un` | size+offsets+round-trip: PASS (sun_path cap 104 measured) | CI-pending (Linux branch coded, cap 108 per baseline, unverified locally) | no CI lane, unverified |
-| `sa_family_t`/`socklen_t` | sizes reported (1/4 bytes darwin) | CI-pending | no CI lane, unverified |
-| `iovec` | size+offsets+round-trip: PASS | CI-pending | no CI lane, unverified |
+| `timespec` | size+offsets+round-trip: PASS | BLOCKED¹ | no CI lane, unverified |
+| `timeval` | size+offsets+round-trip: PASS (tv_usec width measured: 4 bytes darwin) | BLOCKED¹ (Linux branch coded, tv_usec: 8 bytes, unverified locally) | no CI lane, unverified |
+| `sockaddr_in` | size+offsets+round-trip: PASS | BLOCKED¹ | no CI lane, unverified |
+| `sockaddr_in6` | size+offsets+round-trip: PASS | BLOCKED¹ | no CI lane, unverified |
+| `sockaddr_un` | size+offsets+round-trip: PASS (sun_path cap 104 measured) | BLOCKED¹ (Linux branch coded, cap 108 per baseline, unverified locally) | no CI lane, unverified |
+| `sa_family_t`/`socklen_t` | sizes reported (1/4 bytes darwin) | BLOCKED¹ | no CI lane, unverified |
+| `iovec` | size+offsets+round-trip: PASS | BLOCKED¹ | no CI lane, unverified |
 | `kevent` | size+offsets+round-trip: PASS; **alignment mismatch documented** (see below) | N/A (BSD/macOS only) | N/A |
-| `epoll_event` | N/A (Linux only) — reports ENVIRONMENT/SKIP | CI-pending, x86-64 packed-vs-unpacked untested here | **no CI lane exists in this repo; AArch64 packing fact is unverified anywhere reachable from this repo** |
-| `pthread_attr_t` | opaque size/align (64/8) + REAL `pthread_attr_init`/`getstacksize`/`destroy` round trip: PASS | CI-pending | no CI lane, unverified |
-| `pthread_mutex_t` | opaque size/align (64/8) + REAL `pthread_mutex_init`/`lock`/`unlock`/`destroy` round trip: PASS | CI-pending | no CI lane, unverified |
+| `epoll_event` | N/A (Linux only) — reports ENVIRONMENT/SKIP | BLOCKED¹, x86-64 packed-vs-unpacked untested here | **no CI lane exists in this repo; AArch64 packing fact is unverified anywhere reachable from this repo** |
+| `pthread_attr_t` | opaque size/align (64/8) + REAL `pthread_attr_init`/`getstacksize`/`destroy` round trip: PASS | BLOCKED¹ | no CI lane, unverified |
+| `pthread_mutex_t` | opaque size/align (64/8) + REAL `pthread_mutex_init`/`lock`/`unlock`/`destroy` round trip: PASS | BLOCKED¹ | no CI lane, unverified |
 
 By-value / by-pointer argument passing:
 - `timespec` (16 bytes, register-pair sized): passed BY VALUE into C and
@@ -75,21 +95,21 @@ to be unnecessary here or documented as a structural constraint."
 
 | Call | macOS arm64 | Linux (CI) |
 |---|---|---|
-| `sysconf(_SC_PAGESIZE)` | PASS, matches oracle | CI-pending |
-| `mmap`/`munmap`/`mprotect` | PASS (reserve, write/read through it, reprotect, release) | CI-pending |
-| `clock_gettime(CLOCK_MONOTONIC)` | PASS, matches oracle within 1s, monotonic across two reads | CI-pending |
+| `sysconf(_SC_PAGESIZE)` | PASS, matches oracle | BLOCKED¹ |
+| `mmap`/`munmap`/`mprotect` | PASS (reserve, write/read through it, reprotect, release) | BLOCKED¹ |
+| `clock_gettime(CLOCK_MONOTONIC)` | PASS, matches oracle within 1s, monotonic across two reads | BLOCKED¹ |
 | `mach_absolute_time`+`mach_timebase_info` | PASS (macOS-only "honest path"), matches oracle within 1s | N/A |
-| `socket`/`close` | PASS | CI-pending |
-| `read` | PASS (direct `@extern`) | CI-pending |
-| `write` | PASS, but via `std.io.FileDescriptor.write()` — see mojito-sys#195, a custom `@extern("write")` conflicts with the stdlib's own internal binding | CI-pending |
-| `recv`/`send` | PASS, byte-exact payloads both directions | CI-pending |
-| `fcntl` (2-arg and 3-arg) | PASS — `F_GETFL` reads the real flags, `F_SETFL` demonstrably changes them | CI-pending |
-| `open` (2-arg and 3-arg) | PASS on `/dev/null` | CI-pending |
-| `ioctl` (`FIONREAD`, 3-arg) | call itself succeeds/reachable; **pointer write-through NOT observed — mojito-sys#196** | CI-pending |
+| `socket`/`close` | PASS | BLOCKED¹ |
+| `read` | PASS (direct `@extern`) | BLOCKED¹ |
+| `write` | PASS, but via `std.io.FileDescriptor.write()` — see mojito-sys#195, a custom `@extern("write")` conflicts with the stdlib's own internal binding | BLOCKED¹ |
+| `recv`/`send` | PASS, byte-exact payloads both directions | BLOCKED¹ |
+| `fcntl` (2-arg and 3-arg) | PASS — `F_GETFL` reads the real flags, `F_SETFL` demonstrably changes them | BLOCKED¹ |
+| `open` (2-arg and 3-arg) | PASS on `/dev/null` | BLOCKED¹ |
+| `ioctl` (`FIONREAD`, 3-arg) | call itself succeeds/reachable; **pointer write-through NOT observed — mojito-sys#196** | BLOCKED¹ |
 
 errno: read directly via the platform's real accessor (`__error()` on
 macOS; `__errno_location()` declared and selected via `comptime if` for
-Linux, CI-pending) across three distinct, deliberately-triggered failure
+Linux, BLOCKED¹) across three distinct, deliberately-triggered failure
 modes, each diffed against the oracle forcing the identical failure:
 
 - **EBADF** — `close(-1)`: PASS.
@@ -141,19 +161,32 @@ leaf/non-leaf distinction for THIS leg specifically:
 | mojito-sys#197 | no module-level conditional compilation for `@extern`; one symbol can only be declared once per module regardless of arity |
 | mojito-sys#198 | no struct-alignment-override attribute (no `#pragma pack` equivalent) — feature gap, not a crash |
 
-## Explicitly unverified / CI-pending
+## Explicitly unverified / BLOCKED¹
 
 - Every Linux x86-64 row above: coded and believed correct (the Linux
   branches follow the same measured-not-assumed methodology as the
-  macOS ones), but genuinely unverified on this host — this repo's CI
-  `suite-linux` job is the first real Linux run of this suite.
+  macOS ones), but genuinely unverified anywhere — confirmed directly
+  that `suite-linux` never reaches this suite at all, because `make`
+  itself fails first on the pre-existing Apple-only `aarch64_switch.S`
+  wall (see the footnote above). Getting a real Linux x86-64 signal for
+  this leg needs that pre-existing build-split fixed first, which is a
+  separate, larger piece of work than this issue and not attempted here.
 - `epoll_event` AArch64 packed-vs-unpacked: **unverified anywhere
   reachable from this repo** — there is no Linux AArch64 CI lane in
   `.github/workflows/ci.yml` at all (only `suite-macos` and the x86-64
-  `suite-linux`). If #145's audit needs this fact pinned down, it needs
-  either a new CI lane or a manual run on real Linux AArch64 hardware;
-  neither happened here.
+  `suite-linux`), and `suite-linux` itself never gets far enough to run
+  anything Mojo-related regardless. If #145's audit needs this fact
+  pinned down, it needs a new CI lane (or two) and the build-split fix
+  above; neither happened here.
 - The mach-vs-clock_gettime epoch cross-check was removed from the test
   suite as a test-design mistake (the two clocks aren't guaranteed to
   share an epoch), not a Mojo finding — noted so it isn't mistaken for a
   silently-dropped check.
+- `suite (macOS arm64)` (the blocking CI job) failed twice more during
+  this leg's own CI verification for reasons that have nothing to do
+  with this leg: `s3-other` (mutex/condvar/semaphore/event tests, never
+  touched by this PR) flaked, which is a pre-existing, already-tracked,
+  OPEN issue (mojito-sys#192, "s3-other is failing the blocking macOS
+  lane again, and the gate's CI output does not say why") — not
+  something this PR introduces or is responsible for fixing. The
+  `abi-spike` driver itself is confirmed green in that same run.
