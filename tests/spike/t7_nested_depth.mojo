@@ -11,14 +11,14 @@
 
 from std.memory import stack_allocation
 
-from mojito_spike import (
+from native_stack import NativeStack, page_size
+from ctx_direct import (
     BytePtr,
-    MS_CTX_SIZE,
+    MS_CONTEXT_SIZE,
     entry_pointer,
-    ms_ctx_make,
-    ms_ctx_switch,
-    ms_stack_alloc,
-    ms_stack_free,
+    ms_context_make,
+    ms_context_switch,
+    ms_context_capture_self,
 )
 
 comptime STACK_BYTES = 262144  # must comfortably hold DEPTH live frames
@@ -64,8 +64,8 @@ def dive(fp: UnsafePointer[Frame, MutAnyOrigin], level: Int) -> Bool:
     if level == 1:
         # Bottom of a DEPTH-deep chain: suspend twice before unwinding.
         fp[].phase = 1
-        ms_ctx_switch(fp[].self_ctx, fp[].back_ctx)
-        ms_ctx_switch(fp[].self_ctx, fp[].back_ctx)
+        ms_context_switch(fp[].self_ctx, fp[].back_ctx)
+        ms_context_switch(fp[].self_ctx, fp[].back_ctx)
 
     # Unwind path: every frame's local must be exactly what it stored.
     if cookie != level * 7:
@@ -81,31 +81,38 @@ def alt_entry(ud: BytePtr) abi("C"):
     var fp = ud.bitcast[Frame]()
     _ = dive(fp, DEPTH)
     # Hand control back one last time; main treats this as completion.
-    ms_ctx_switch(fp[].self_ctx, fp[].back_ctx)
+    ms_context_switch(fp[].self_ctx, fp[].back_ctx)
 
 
 def main() raises:
     var ok = True
     var reason = "ok"
 
-    var slots = stack_allocation[2, BytePtr]()
-    if ms_stack_alloc(STACK_BYTES, slots, slots + 1) != 0:
+    var ps = page_size()
+    var stack = NativeStack()
+    try:
+        stack = NativeStack.create(STACK_BYTES, STACK_BYTES, ps)
+    except e:
         ok = False
-        reason = "ms_stack_alloc failed"
+        reason = "NativeStack.create failed: " + String(e)
 
     if ok:
-        var main_buf = stack_allocation[MS_CTX_SIZE // 8, Int]()
-        var alt_buf = stack_allocation[MS_CTX_SIZE // 8, Int]()
+        var main_buf = stack_allocation[MS_CONTEXT_SIZE // 8, Int]()
+        var alt_buf = stack_allocation[MS_CONTEXT_SIZE // 8, Int]()
         var main_ctx = main_buf.bitcast[Byte]()
         var alt_ctx = alt_buf.bitcast[Byte]()
+        ms_context_capture_self(main_ctx)
 
         var frame = Frame()
         frame.self_ctx = alt_ctx
         frame.back_ctx = main_ctx
         var frame_p = UnsafePointer[Frame, MutAnyOrigin](to=frame).bitcast[Byte]()
 
-        ms_ctx_make(alt_ctx, (slots + 1)[], entry_pointer["t7_alt_entry"](), frame_p)
-        ms_ctx_switch(main_ctx, alt_ctx)  # enter; DESCENDS to depth 1 and yields
+        ms_context_make(
+            alt_ctx, stack.guard_low_address(), stack.top_address(),
+            entry_pointer["t7_alt_entry"](), frame_p,
+        )
+        ms_context_switch(main_ctx, alt_ctx)  # enter; DESCENDS to depth 1 and yields
         if frame.phase != 1:
             ok = False
             reason = (
@@ -113,8 +120,8 @@ def main() raises:
             )
 
         if ok:
-            ms_ctx_switch(main_ctx, alt_ctx)  # first planned suspension done
-            ms_ctx_switch(main_ctx, alt_ctx)  # unwind completes; entry hands back
+            ms_context_switch(main_ctx, alt_ctx)  # first planned suspension done
+            ms_context_switch(main_ctx, alt_ctx)  # unwind completes; entry hands back
 
             if frame.corrupt:
                 ok = False
@@ -137,7 +144,8 @@ def main() raises:
                     + String(expected_checksum())
                 )
 
-        ms_stack_free(slots[])
+        # `stack` drops here (NativeStack.__del__ releases it exactly
+        # once); no explicit free call needed.
 
     print(
         "T7 nested call depth ("
