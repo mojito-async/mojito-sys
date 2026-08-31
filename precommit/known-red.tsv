@@ -19,16 +19,19 @@
 # matched by a bare `grep`, two fields, no validation at all. Two of its
 # rows were rot: `s5-tests` pointed at mojito-sys#67, which closed the
 # moment PR #118 merged the very api-mojo lane that row was still masking
-# (that lane is genuinely red today — split out below as `s5-ctx-api`,
-# tracked by the new issue #173, since #67 covers work that DID land).
+# (that lane is genuinely red today, split out below as `s5-ctx-api`,
+# since #67 covers work that DID land). That lane is now tracked by #142,
+# the context issue that rebuilds the same `@export` dispatch and owns
+# fixing it.
 # `s6-completion-probe` pointed at a different closed issue (#77) and
 # matched no check name printed by anything in this tree, so it shielded
 # nothing while looking like a legitimate row — removed outright, no
 # replacement needed.
-s5-ctx-api	https://github.com/mojito-async/mojito-sys/issues/173	2026-08-30
+s5-ctx-api	https://github.com/mojito-async/mojito-sys/issues/142	2026-08-30
 # `make bench` crashes intermittently (SIGTRAP inside Mojo's own
 # libKGENCompilerRTShared.dylib during the sampled-latency phase, ~2 of 3
-# runs when its stdout is captured, as the gate always does) — a genuine
-# flake, not a code defect here; the flake protocol issue #169 sets out is
-# an issue + a dated row, never `--no-verify`.
-bench	https://github.com/mojito-async/mojito-sys/issues/175	2026-08-30
+# runs when its stdout is captured, as the gate always does). A genuine
+# toolchain flake, not a code defect here. The flake protocol issue #169
+# sets out is an issue plus a dated row, never `--no-verify`. Tracked by
+# #129, which owns the paired benchmark harness this crashes inside.
+bench	https://github.com/mojito-async/mojito-sys/issues/129	2026-08-30
