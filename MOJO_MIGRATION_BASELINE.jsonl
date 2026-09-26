@@ -1,0 +1,45 @@
+{"suite":"meta","host":"Darwin/arm64/25.6.0","os_version":"macOS 26.6.2 (build 25G83)","toolchain":"mojolang Homebrew tap","mojo_version":"1.0.0b2 (2cf4d08a)","cc":"Apple clang version 21.0.0 (clang-2100.0.123.102)","page_size_bytes":16384,"date":"2026-08-31"}
+{"suite":"benchmark","test":"ffi_noop","platform":"macos-arm64","comparison":"Mojo calling mjs_abi_version() (trivial C-side work)","ops_per_sec":1086516069,"iterations":20000000,"sample_count":20000000}
+{"suite":"benchmark","test":"page_size","platform":"macos-arm64","comparison":"Mojo calling mjs_page_size() (cached sysconf)","ops_per_sec":580597162,"iterations":20000000,"sample_count":20000000}
+{"suite":"benchmark","test":"vm_reserve_release","platform":"macos-arm64","comparison":"VirtualMemory.reserve(1MiB)+.release(): one mmap + one munmap per cycle","ops_per_sec":1480823,"iterations":20000,"sample_count":20000}
+{"suite":"benchmark","test":"vm_commit_decommit","platform":"macos-arm64","comparison":"commit(0,page)+decommit(0,page) on a pre-reserved 1MiB region","ops_per_sec":582706,"iterations":20000,"sample_count":20000}
+{"suite":"benchmark","test":"thread_create_join","platform":"macos-arm64","comparison":"spawn_native_thread()+.join(): one real pthread_create+pthread_join per cycle","ops_per_sec":46218,"iterations":2000,"sample_count":2000}
+{"suite":"benchmark","test":"tls_get_set","platform":"macos-arm64","comparison":"NativeTlsKey.get() steady-state read (SYS-4 must-not-allocate path)","ops_per_sec":229160152,"iterations":20000000,"sample_count":20000000}
+{"suite":"benchmark","test":"clock_read","platform":"macos-arm64","comparison":"MonotonicInstant.now() (mach_absolute_time + cached timebase scaling)","ops_per_sec":75481481,"iterations":15096400,"sample_count":15096400}
+{"suite":"benchmark","test":"event_wait_wake","platform":"macos-arm64","comparison":"uncontended signal()+wait() round trip, same thread","ops_per_sec":78803572,"iterations":15760800,"sample_count":15760800}
+{"suite":"benchmark","test":"event_wait_wake","platform":"macos-arm64","comparison":"cross-thread wake latency: one worker parked in wait(), signaled from main","ns":2792,"sample_count":16}
+{"suite":"benchmark","test":"context_switch","platform":"macos-arm64","comparison":"benchmark/ctx/bench_switch.mojo: production ms_context v2/v3 ABI, self-contained A->B->A ping-pong (min-of-N per single switch)","ns":6,"round_trips_per_sec":72069450,"p50_ns":12,"p95_ns":12,"p99_ns":1012,"sample_count":10}
+{"suite":"benchmark","test":"poller_add_remove","platform":"macos-arm64","comparison":"benchmark/io/poller_bench.mojo, kqueue backend: register+modify+unregister triple","ops_per_sec":813788,"iterations":32000,"sample_count":32000,"reg_1024_ops_per_sec":2302846,"reg_10240_ops_per_sec":2220034}
+{"suite":"benchmark","test":"poller_wake","platform":"macos-arm64","comparison":"benchmark/io/poller_bench.mojo, cross-thread EVFILT_USER wake latency","ns":67875,"sample_count":16}
+{"suite":"benchmark","test":"socket_loopback_roundtrip","platform":"macos-arm64","comparison":"benchmark/io/socket_loopback_bench.mojo, AF_INET loopback ping-pong","ns":9615,"sample_count":12000,"connect_setup_ns":23695,"thrpt_4k_mib_per_sec":570,"thrpt_64k_mib_per_sec":9027}
+{"suite":"size","test":"libmojito_sys.dylib","platform":"macos-arm64","bytes":70432}
+{"suite":"size","test":"libmojito_spike.dylib","platform":"macos-arm64","bytes":34744}
+{"suite":"size","test":"exported_symbol_count","platform":"macos-arm64","value":93}
+{"suite":"size","test":"minimal_mojo_executable","platform":"macos-arm64","bytes":35800,"note":"mojo build of a bare def main(): print(hi), no -Xlinker"}
+{"suite":"allocation","test":"mjs_page_size","platform":"macos-arm64","iterations":100000,"alloc_calls":0,"free_calls":0}
+{"suite":"allocation","test":"mjs_clock_now","platform":"macos-arm64","iterations":100000,"alloc_calls":0,"free_calls":0}
+{"suite":"allocation","test":"mjs_vm_commit_decommit","platform":"macos-arm64","iterations":1000,"alloc_calls":0,"free_calls":0}
+{"suite":"allocation","test":"mjs_tls_get","platform":"macos-arm64","iterations":100000,"alloc_calls":0,"free_calls":0}
+{"suite":"allocation","test":"mjs_thread_spawn_join","platform":"macos-arm64","iterations":200,"alloc_calls":200,"free_calls":200,"note":"thread spawn is not claimed allocation-free by the header; this confirms the actual count (one calloc per spawn, one free per join)"}
+{"suite":"allocation","test":"ms_context_switch_self_capture","platform":"macos-arm64","iterations":100000,"alloc_calls":0,"free_calls":0}
+{"suite":"allocation","test":"mjs_event_signal_wait","platform":"macos-arm64","iterations":100000,"alloc_calls":0,"free_calls":0}
+{"suite":"allocation","test":"mjs_atomic_wake_one_u32_first_call","platform":"macos-arm64","iterations":1,"alloc_calls":512,"free_calls":0,"note":"one-time lazy pthread_once init of the macOS 256-slot waiter table (256 mutex + 256 condvar); not a per-call cost, see steady-state row"}
+{"suite":"allocation","test":"mjs_atomic_wake_one_u32_steady_state","platform":"macos-arm64","iterations":100000,"alloc_calls":0,"free_calls":0}
+{"suite":"allocation","test":"mjs_poller_wake","platform":"macos-arm64","iterations":100000,"alloc_calls":0,"free_calls":0}
+{"suite":"msvs","test":"gate_selftest","platform":"macos-arm64","mojo":"1.0.0b2","result":"PASS"}
+{"suite":"msvs","test":"selftest","platform":"macos-arm64","mojo":"1.0.0b2","result":"PASS"}
+{"suite":"msvs","test":"no-markers","platform":"macos-arm64","mojo":"1.0.0b2","result":"PASS"}
+{"suite":"msvs","test":"t1-t7","platform":"macos-arm64","mojo":"1.0.0b2","result":"PASS"}
+{"suite":"msvs","test":"t8-t14","platform":"macos-arm64","mojo":"1.0.0b2","result":"PASS"}
+{"suite":"msvs","test":"bench","platform":"macos-arm64","mojo":"1.0.0b2","result":"PASS","note":"allow-listed known-red in precommit/known-red.tsv against #129 (intermittent SIGTRAP flake); this run completed clean"}
+{"suite":"msvs","test":"s1-tests","platform":"macos-arm64","mojo":"1.0.0b2","result":"PASS"}
+{"suite":"msvs","test":"s2-tests","platform":"macos-arm64","mojo":"1.0.0b2","result":"PASS"}
+{"suite":"msvs","test":"s2-conformance","platform":"macos-arm64","mojo":"1.0.0b2","result":"PASS"}
+{"suite":"msvs","test":"s2-stress","platform":"macos-arm64","mojo":"1.0.0b2","result":"PASS"}
+{"suite":"msvs","test":"s2-integration","platform":"macos-arm64","mojo":"1.0.0b2","result":"PASS"}
+{"suite":"msvs","test":"s2-pkg","platform":"macos-arm64","mojo":"1.0.0b2","result":"PASS"}
+{"suite":"msvs","test":"s3-atomic-wait","platform":"macos-arm64","mojo":"1.0.0b2","result":"PASS"}
+{"suite":"msvs","test":"s3-other","platform":"macos-arm64","mojo":"1.0.0b2","result":"PASS"}
+{"suite":"msvs","test":"s5-ctx-api","platform":"macos-arm64","mojo":"1.0.0b2","result":"RED","tracking_issue":"https://github.com/mojito-async/mojito-sys/issues/142"}
+{"suite":"msvs","test":"s5-other","platform":"macos-arm64","mojo":"1.0.0b2","result":"PASS"}
+{"suite":"msvs","test":"s6-tests","platform":"macos-arm64","mojo":"1.0.0b2","result":"PASS"}
